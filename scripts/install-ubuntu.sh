@@ -78,6 +78,8 @@ cd backend
 go build -o $APP_DIR/bin/api-server ./cmd/server/main.go
 # Copy migrations for the backend to use
 cp -r migrations $APP_DIR/migrations
+# Copy example config as a base
+cp config.example.yml $APP_DIR/config.yml
 cd ..
 
 # Build frontend
@@ -115,8 +117,8 @@ DB_NAME=infrasense
 DB_USER=infrasense
 DB_PASSWORD=infrasense
 DB_SSLMODE=disable
-JWT_SECRET=install_auto_jwt_key_32_chars_123
-ENCRYPTION_KEY=install_auto_enc_key_32_chars_123
+JWT_SECRET=install_auto_jwt_key_32_chars_12
+ENCRYPTION_KEY=install_auto_enc_key_32_chars_12
 VICTORIAMETRICS_URL=http://127.0.0.1:8428/api/v1/write
 API_HOST=127.0.0.1
 API_PORT=8080

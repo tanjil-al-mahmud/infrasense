@@ -1,0 +1,39 @@
+# InfraSense Platform - Development Docker Compose
+# Extends the production compose with exposed ports for local development
+# Usage: docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d
+
+services:
+  postgres:
+    ports:
+      - "5432:5432"
+
+  victoriametrics:
+    ports:
+      - "8428:8428"
+
+  prometheus:
+    ports:
+      - "9090:9090"
+
+  alertmanager:
+    ports:
+      - "9093:9093"
+
+  grafana:
+    ports:
+      - "3000:3000"
+
+  loki:
+    ports:
+      - "3100:3100"
+
+  api-server:
+    ports:
+      - "8080:8080"
+    environment:
+      LOG_LEVEL: debug
+      ENVIRONMENT: development
+
+  frontend:
+    ports:
+      - "5173:80"

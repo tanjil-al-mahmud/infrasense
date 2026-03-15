@@ -1,0 +1,123 @@
+{{- if .Values.notificationService.enabled }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: notification-service
+  namespace: {{ include "infrasense.namespace" . }}
+  labels:
+    {{- include "infrasense.labels" . | nindent 4 }}
+    app: notification-service
+    component: backend
+spec:
+  replicas: {{ .Values.notificationService.replicas }}
+  selector:
+    matchLabels:
+      app: notification-service
+  template:
+    metadata:
+      labels:
+        app: notification-service
+        component: backend
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+      containers:
+        - name: notification-service
+          image: {{ .Values.imagePrefix }}{{ .Values.notificationService.image }}:{{ .Values.global.imageTag }}
+          imagePullPolicy: {{ .Values.global.imagePullPolicy }}
+          ports:
+            - containerPort: {{ .Values.notificationService.port }}
+              name: http
+          env:
+            - name: SMTP_HOST
+              valueFrom:
+                secretKeyRef:
+                  name: infrasense-notification-secret
+                  key: smtp-host
+                  optional: true
+            - name: SMTP_PORT
+              valueFrom:
+                secretKeyRef:
+                  name: infrasense-notification-secret
+                  key: smtp-port
+                  optional: true
+            - name: SMTP_USERNAME
+              valueFrom:
+                secretKeyRef:
+                  name: infrasense-notification-secret
+                  key: smtp-username
+                  optional: true
+            - name: SMTP_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: infrasense-notification-secret
+                  key: smtp-password
+                  optional: true
+            - name: SMTP_FROM
+              valueFrom:
+                secretKeyRef:
+                  name: infrasense-notification-secret
+                  key: smtp-from
+                  optional: true
+            - name: TELEGRAM_BOT_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: infrasense-notification-secret
+                  key: telegram-bot-token
+                  optional: true
+            - name: TELEGRAM_CHAT_ID
+              valueFrom:
+                secretKeyRef:
+                  name: infrasense-notification-secret
+                  key: telegram-chat-id
+                  optional: true
+            - name: SLACK_WEBHOOK_URL
+              valueFrom:
+                secretKeyRef:
+                  name: infrasense-notification-secret
+                  key: slack-webhook-url
+                  optional: true
+            - name: LOG_LEVEL
+              value: {{ .Values.notificationService.env.logLevel }}
+            - name: LOG_FORMAT
+              value: {{ .Values.notificationService.env.logFormat }}
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: {{ .Values.notificationService.port }}
+            initialDelaySeconds: 30
+            periodSeconds: 30
+            timeoutSeconds: 10
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: {{ .Values.notificationService.port }}
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3
+          resources:
+            {{- toYaml .Values.notificationService.resources | nindent 12 }}
+      restartPolicy: Always
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: notification-service
+  namespace: {{ include "infrasense.namespace" . }}
+  labels:
+    {{- include "infrasense.labels" . | nindent 4 }}
+    app: notification-service
+    component: backend
+spec:
+  selector:
+    app: notification-service
+  ports:
+    - name: http
+      port: {{ .Values.notificationService.port }}
+      targetPort: {{ .Values.notificationService.port }}
+      protocol: TCP
+  type: ClusterIP
+{{- end }}

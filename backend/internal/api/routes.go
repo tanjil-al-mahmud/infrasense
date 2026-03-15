@@ -3,9 +3,11 @@ package api
 import (
 	"context"
 	"log"
+	"os"
 	"strings"
 	"time"
 
+	"github.com/gin-contrib/gzip"
 	"github.com/gin-gonic/gin"
 	"github.com/infrasense/backend/internal/api/handlers"
 	"github.com/infrasense/backend/internal/api/middleware"
@@ -52,11 +54,20 @@ func (s *Server) startCollectorHealthMonitor(collectorRepo *db.CollectorStatusRe
 func (s *Server) SetupRoutes() {
 	// Apply global middleware
 	s.router.Use(middleware.LoggingMiddleware())
-	s.router.Use(middleware.CORSMiddleware([]string{"http://localhost:3000", "http://localhost"}))
+
+	allowedOrigins := []string{"http://localhost:3000", "http://localhost", "http://127.0.0.1"}
+	if originsStr := os.Getenv("CORS_ALLOWED_ORIGINS"); originsStr != "" {
+		allowedOrigins = append(allowedOrigins, strings.Split(originsStr, ",")...)
+	}
+	s.router.Use(middleware.CORSMiddleware(allowedOrigins))
+
 	s.router.Use(middleware.RateLimitMiddleware(100, time.Minute))
 
-	// Initialize cache
-	cache := middleware.NewCache()
+	s.router.Use(middleware.TimeoutMiddleware(30 * time.Second))
+	s.router.Use(middleware.SecurityHeadersMiddleware())
+
+	// Add GZIP compression
+	s.router.Use(gzip.Gzip(gzip.DefaultCompression))
 
 	// Health check endpoints (no auth required)
 	s.router.GET("/health", func(c *gin.Context) {
@@ -98,8 +109,12 @@ func (s *Server) SetupRoutes() {
 		}
 	}
 
+	// Initialize cache
+	apiCache := middleware.NewCache()
+
 	// Initialize handlers
 	authHandler := handlers.NewAuthHandler(userRepo, s.jwtService, auditService)
+	userHandler := handlers.NewUserHandler(userRepo)
 	deviceHandler := handlers.NewDeviceHandler(deviceRepo, auditService).
 		WithCredentialSupport(credentialRepo, credentialService).
 		WithMetricsSupport(vmQueryURL)
@@ -119,7 +134,6 @@ func (s *Server) SetupRoutes() {
 	auth := v1.Group("/auth")
 	{
 		auth.POST("/login", authHandler.Login)
-		auth.POST("/logout", authHandler.Logout)
 	}
 
 	// Protected routes (authentication required)
@@ -128,12 +142,25 @@ func (s *Server) SetupRoutes() {
 	{
 		// Auth routes
 		protected.GET("/auth/me", authHandler.Me)
+		protected.POST("/auth/logout", authHandler.Logout)
+
+		// User management routes
+		users := protected.Group("/users")
+		{
+			users.GET("/me", userHandler.GetMe)
+			users.PUT("/me/password", userHandler.ChangeOwnPassword)
+			users.GET("", middleware.RequireAdmin(), userHandler.ListUsers)
+			users.POST("", middleware.RequireAdmin(), userHandler.CreateUser)
+			users.GET("/:id", middleware.RequireAdmin(), userHandler.GetUser)
+			users.PUT("/:id", middleware.RequireAdmin(), userHandler.UpdateUser)
+			users.DELETE("/:id", middleware.RequireAdmin(), userHandler.DeleteUser)
+			users.PUT("/:id/password", userHandler.ChangePassword)
+		}
 
 		// Device routes
 		devices := protected.Group("/devices")
 		{
-			// Apply caching to device list endpoint (30 seconds TTL)
-			devices.GET("", middleware.CacheMiddleware(cache, 30*time.Second), deviceHandler.List)
+			devices.GET("", middleware.CacheMiddleware(apiCache, 1*time.Minute), deviceHandler.List)
 			devices.GET("/:id", deviceHandler.GetByID)
 			devices.POST("", middleware.RequireAdminOrOperator(), deviceHandler.Create)
 			devices.PUT("/:id", middleware.RequireAdminOrOperator(), deviceHandler.Update)
@@ -150,8 +177,9 @@ func (s *Server) SetupRoutes() {
 			devices.POST("/:id/power", middleware.RequireAdminOrOperator(), deviceHandler.PowerControl)
 			devices.POST("/:id/boot", middleware.RequireAdminOrOperator(), deviceHandler.BootControl)
 
-			// Device metrics and inventory
+			// Device metrics, logs and inventory
 			devices.GET("/:id/metrics", deviceHandler.GetMetrics)
+			devices.GET("/:id/logs", deviceHandler.GetDeviceLogs)
 			devices.GET("/:id/inventory", deviceHandler.GetInventory)
 			devices.GET("/:id/stream", streamHandler.StreamTelemetry)
 			devices.POST("/detect-protocol", middleware.RequireAdminOrOperator(), protocolHandler.DetectProtocol)
@@ -160,7 +188,7 @@ func (s *Server) SetupRoutes() {
 		// Device groups routes
 		groups := protected.Group("/device-groups")
 		{
-			groups.GET("", groupHandler.List)
+			groups.GET("", middleware.CacheMiddleware(apiCache, 1*time.Minute), groupHandler.List)
 			groups.GET("/:id", groupHandler.GetByID)
 			groups.POST("", middleware.RequireAdminOrOperator(), groupHandler.Create)
 			groups.PUT("/:id", middleware.RequireAdminOrOperator(), groupHandler.Update)
@@ -172,7 +200,7 @@ func (s *Server) SetupRoutes() {
 		// Alert rules routes
 		alertRules := protected.Group("/alert-rules")
 		{
-			alertRules.GET("", alertRuleHandler.List)
+			alertRules.GET("", middleware.CacheMiddleware(apiCache, 1*time.Minute), alertRuleHandler.List)
 			alertRules.GET("/:id", alertRuleHandler.GetByID)
 			alertRules.POST("", middleware.RequireAdminOrOperator(), alertRuleHandler.Create)
 			alertRules.PUT("/:id", middleware.RequireAdminOrOperator(), alertRuleHandler.Update)
@@ -198,8 +226,7 @@ func (s *Server) SetupRoutes() {
 		// Collector routes
 		collectors := protected.Group("/collectors")
 		{
-			// Apply caching to collector list endpoint (10 seconds TTL)
-			collectors.GET("", middleware.CacheMiddleware(cache, 10*time.Second), collectorHandler.List)
+			collectors.GET("", collectorHandler.List)
 			collectors.GET("/:id", collectorHandler.GetByID)
 		}
 	}

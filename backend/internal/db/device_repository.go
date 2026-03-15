@@ -21,6 +21,11 @@ func NewDeviceRepository(db *DB) *DeviceRepository {
 	return &DeviceRepository{db: db}
 }
 
+// DB returns the underlying database handle.
+func (r *DeviceRepository) DB() *DB {
+	return r.db
+}
+
 // Create creates a new device
 func (r *DeviceRepository) Create(ctx context.Context, req models.DeviceCreateRequest) (*models.Device, error) {
 	device := &models.Device{

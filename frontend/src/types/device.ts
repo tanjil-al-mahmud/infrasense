@@ -344,10 +344,20 @@ export interface DeviceInventory {
 }
 
 export interface DeviceMetricPoint { timestamp: number; value: number }
+
+export interface NetworkInterfaceMetrics {
+  name: string;
+  bytes_sent?: DeviceMetricPoint[];
+  bytes_recv?: DeviceMetricPoint[];
+  errors_in?: DeviceMetricPoint[];
+  errors_out?: DeviceMetricPoint[];
+}
+
 export interface DeviceMetrics {
   temperature?: DeviceMetricPoint[];
   fan_speed?: DeviceMetricPoint[];
   power_consumption?: DeviceMetricPoint[];
+  network_interfaces?: NetworkInterfaceMetrics[];
 }
 
 export interface PowerControlRequest {
@@ -389,8 +399,34 @@ export interface ProtocolProbeResult {
 
 export interface ProtocolDetectionResult {
   bmc_ip_address: string;
+  vendor: string;
+  model: string;
+  bmc_type: string;
+  supported_protocols: string[];
   recommended_protocol: string;
   probes: ProtocolProbeResult[];
+}
+
+export type DeviceLogSeverity = 'Critical' | 'Warning' | 'Info';
+export type DeviceLogSource = 'sel' | 'lifecycle';
+export type DeviceLogSeverityFilter = 'critical' | 'warning' | 'all';
+
+export interface DeviceLogEntry {
+  id: string;
+  source: DeviceLogSource;
+  severity: DeviceLogSeverity;
+  message: string;
+  timestamp: string;
+}
+
+export interface DeviceLogsResponse {
+  logs: DeviceLogEntry[];
+  total: number;
+}
+
+export interface DeviceLogsParams {
+  severity?: DeviceLogSeverityFilter;
+  limit?: number;
 }
 
 export interface TelemetryEvent {

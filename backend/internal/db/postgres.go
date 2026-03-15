@@ -171,7 +171,7 @@ func (db *DB) validateSchemaVersion(currentVersion uint) error {
 	// This should be updated when the application requires specific schema versions
 	const (
 		minSupportedVersion uint = 0  // Minimum schema version this app can work with
-		maxSupportedVersion uint = 12 // Maximum schema version (current latest migration)
+		maxSupportedVersion uint = 13 // Maximum schema version (current latest migration)
 	)
 
 	// If schema is newer than what we support, it's incompatible

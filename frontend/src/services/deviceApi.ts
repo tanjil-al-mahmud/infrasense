@@ -17,6 +17,7 @@ import {
   DeviceInventory,
   DeviceMetrics,
   DeviceMetricPoint,
+  NetworkInterfaceMetrics,
   ConnectionTestResult,
   DeviceSyncResult,
   PowerControlRequest,
@@ -24,6 +25,8 @@ import {
   BootControlRequest,
   BootControlResult,
   ProtocolDetectionResult,
+  DeviceLogsResponse,
+  DeviceLogsParams,
 } from '../types/device';
 
 /**
@@ -126,8 +129,48 @@ export const fetchDeviceMetrics = async (id: string): Promise<DeviceMetrics> => 
     temperature: extractPoints(raw['infrasense_redfish_temperature_celsius']),
     fan_speed: extractPoints(raw['infrasense_redfish_fan_speed_rpm']),
     power_consumption: extractPoints(raw['infrasense_redfish_psu_power_watts']),
+    network_interfaces: extractNetworkInterfaces(raw),
   };
 };
+
+// Extract per-interface network metrics from SSH collector metric names:
+// infrasense_ssh_net_bytes_sent{device_id, interface}
+// infrasense_ssh_net_bytes_recv{device_id, interface}
+// infrasense_ssh_net_errin{device_id, interface}
+// infrasense_ssh_net_errout{device_id, interface}
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function extractNetworkInterfaces(raw: Record<string, any>): NetworkInterfaceMetrics[] {
+  const ifaceMap = new Map<string, NetworkInterfaceMetrics>();
+
+  const metricKeys: Array<{ key: string; field: keyof NetworkInterfaceMetrics }> = [
+    { key: 'infrasense_ssh_net_bytes_sent', field: 'bytes_sent' },
+    { key: 'infrasense_ssh_net_bytes_recv', field: 'bytes_recv' },
+    { key: 'infrasense_ssh_net_errin',      field: 'errors_in' },
+    { key: 'infrasense_ssh_net_errout',     field: 'errors_out' },
+  ];
+
+  for (const { key, field } of metricKeys) {
+    const metricData = raw[key];
+    if (!metricData?.result) continue;
+    for (const series of metricData.result) {
+      const ifaceName: string = series?.metric?.interface ?? series?.metric?.device ?? 'unknown';
+      if (!ifaceMap.has(ifaceName)) {
+        ifaceMap.set(ifaceName, { name: ifaceName });
+      }
+      const entry = ifaceMap.get(ifaceName)!;
+      const points: DeviceMetricPoint[] = (series?.values ?? [])
+        .map(([ts, val]: [number, string]) => ({ timestamp: Number(ts), value: parseFloat(val) }))
+        .filter((pt: DeviceMetricPoint) => !isNaN(pt.value))
+        .sort((a: DeviceMetricPoint, b: DeviceMetricPoint) => a.timestamp - b.timestamp);
+      if (points.length > 0) {
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        (entry as any)[field] = points;
+      }
+    }
+  }
+
+  return Array.from(ifaceMap.values()).sort((a, b) => a.name.localeCompare(b.name));
+}
 
 /**
  * Save credentials for a device
@@ -189,8 +232,26 @@ export const bootControlDevice = async (
  * Auto-detect supported protocols for a BMC IP
  * POST /api/v1/devices/detect-protocol
  */
-export const detectProtocol = async (bmcIP: string): Promise<ProtocolDetectionResult> => {
-  const response = await apiClient.post<ProtocolDetectionResult>('/devices/detect-protocol', { bmc_ip_address: bmcIP });
+export const detectProtocol = async (bmcIP: string, username?: string, password?: string): Promise<ProtocolDetectionResult> => {
+  const response = await apiClient.post<ProtocolDetectionResult>('/devices/detect-protocol', { 
+    bmc_ip: bmcIP,
+    username,
+    password
+  });
+  return response.data;
+};
+
+/**
+ * Fetch device logs (SEL + lifecycle) with optional severity filter and limit
+ * GET /api/v1/devices/{id}/logs
+ */
+export const fetchDeviceLogs = async (
+  id: string,
+  params?: DeviceLogsParams
+): Promise<DeviceLogsResponse> => {
+  const response = await apiClient.get<DeviceLogsResponse>(`/devices/${id}/logs`, {
+    params,
+  });
   return response.data;
 };
 

@@ -4,10 +4,20 @@ import (
 	"fmt"
 	"log"
 	"math"
+	"strings"
 	"time"
 
 	"github.com/gosnmp/gosnmp"
 )
+
+// isTimeoutError returns true if the error looks like an SNMP timeout.
+func isTimeoutError(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "timeout") || strings.Contains(msg, "timed out") || strings.Contains(msg, "i/o timeout")
+}
 
 const (
 	maxBackoffDuration = 10 * time.Minute
@@ -92,12 +102,18 @@ func (c *SNMPCollector) PollDeviceWithRetry(device Device) {
 
 	log.Printf("Polling device %s (%s)", device.Hostname, device.IPAddress)
 
+	// Enforce 10-second SNMP timeout per device poll (requirement 8.8)
+	snmpTimeout := 10 * time.Second
+	if c.timeout > 0 && c.timeout < snmpTimeout {
+		snmpTimeout = c.timeout
+	}
+
 	// Create SNMP client
 	snmpClient := &gosnmp.GoSNMP{
 		Target:    device.IPAddress,
 		Port:      161,
 		Transport: "udp",
-		Timeout:   c.timeout,
+		Timeout:   snmpTimeout,
 		Retries:   2,
 	}
 
@@ -135,7 +151,11 @@ func (c *SNMPCollector) PollDeviceWithRetry(device Device) {
 	// Connect to device
 	err := snmpClient.Connect()
 	if err != nil {
-		log.Printf("Failed to connect to device %s (%s): %v", device.Hostname, device.IPAddress, err)
+		if isTimeoutError(err) {
+			log.Printf("SNMP timeout connecting to device %s (id=%d, ip=%s): %v", device.Hostname, device.ID, device.IPAddress, err)
+		} else {
+			log.Printf("Failed to connect to device %s (%s): %v", device.Hostname, device.IPAddress, err)
+		}
 
 		// Record failure and get backoff duration
 		backoff := c.retryManager.RecordFailure(device.ID, device.Hostname)
@@ -149,17 +169,16 @@ func (c *SNMPCollector) PollDeviceWithRetry(device Device) {
 
 	timestamp := time.Now()
 
-	// Poll UPS metrics
-	if err := c.pollUPSMetrics(snmpClient, device, timestamp); err != nil {
-		log.Printf("Error polling device %s (%s): %v", device.Hostname, device.IPAddress, err)
-
-		// Record failure and get backoff duration
-		backoff := c.retryManager.RecordFailure(device.ID, device.Hostname)
-
-		// Update device status to unavailable
-		c.updateDeviceStatus(device.ID, "unavailable", fmt.Sprintf("Polling failed: %v (retry in %v)", err, backoff))
-
-		return
+	// Poll all SNMP metrics
+	if err := c.PollAllMetrics(snmpClient, device, timestamp); err != nil {
+		if isTimeoutError(err) {
+			log.Printf("SNMP timeout polling device %s (id=%d, ip=%s): %v", device.Hostname, device.ID, device.IPAddress, err)
+			backoff := c.retryManager.RecordFailure(device.ID, device.Hostname)
+			c.updateDeviceStatus(device.ID, "unavailable", fmt.Sprintf("SNMP timeout: %v (retry in %v)", err, backoff))
+			return
+		}
+		log.Printf("Warning: partial poll errors for device %s: %v", device.Hostname, err)
+		// Don't fail on partial errors — some OIDs may not be supported
 	}
 
 	// Record success (resets failure count)

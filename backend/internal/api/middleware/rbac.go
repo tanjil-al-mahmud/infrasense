@@ -10,9 +10,9 @@ import (
 // RequireRole middleware checks if user has required role
 func RequireRole(allowedRoles ...string) gin.HandlerFunc {
 	return func(c *gin.Context) {
-		role, exists := c.Get("role")
+		role, exists := c.Get("user_role")
 		if !exists {
-			c.JSON(http.StatusUnauthorized, gin.H{"error": "User role not found", "code": "UNAUTHORIZED"})
+			c.JSON(http.StatusUnauthorized, gin.H{"error": "Unauthorized"})
 			c.Abort()
 			return
 		}

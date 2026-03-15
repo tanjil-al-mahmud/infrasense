@@ -52,12 +52,12 @@ func Load(configPath string) (*Config, error) {
 	// Load from YAML file if provided
 	if configPath != "" {
 		data, err := os.ReadFile(configPath)
-		if err != nil {
+		if err == nil {
+			if err := yaml.Unmarshal(data, cfg); err != nil {
+				return nil, fmt.Errorf("failed to parse config file: %w", err)
+			}
+		} else if !os.IsNotExist(err) {
 			return nil, fmt.Errorf("failed to read config file: %w", err)
-		}
-
-		if err := yaml.Unmarshal(data, cfg); err != nil {
-			return nil, fmt.Errorf("failed to parse config file: %w", err)
 		}
 	}
 

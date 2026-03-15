@@ -1,0 +1,456 @@
+# InfraSense Platform - Production Docker Compose
+# Usage: docker compose up -d
+# Prerequisites: copy .env.example to .env and fill in values
+
+services:
+  # ─── Infrastructure ───────────────────────────────────────────────────────
+
+  postgres:
+    image: postgres:15-alpine
+    container_name: infrasense-postgres
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      POSTGRES_DB: ${DB_NAME:-infrasense}
+      POSTGRES_USER: ${DB_USER:-infrasense}
+      POSTGRES_PASSWORD: ${DB_PASSWORD:-InfraSense@2024}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${DB_USER:-infrasense}"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+    networks:
+      - infrasense
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+
+  victoriametrics:
+    image: victoriametrics/victoria-metrics:v1.99.0
+    container_name: infrasense-victoriametrics
+    restart: unless-stopped
+    command:
+      - "--storageDataPath=/victoria-metrics-data"
+      - "--retentionPeriod=90d"
+      - "--httpListenAddr=0.0.0.0:8428"
+    volumes:
+      - victoriametrics_data:/victoria-metrics-data
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:8428/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+    networks:
+      - infrasense
+    deploy:
+      resources:
+        limits:
+          memory: 2G
+
+  loki:
+    image: grafana/loki:2.9.6
+    container_name: infrasense-loki
+    restart: unless-stopped
+    command: -config.file=/etc/loki/config.yml
+    volumes:
+      - loki_data:/loki
+      - ./deploy/loki/loki-config.yml:/etc/loki/config.yml:ro
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:3100/ready"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+    networks:
+      - infrasense
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+
+  promtail:
+    image: grafana/promtail:2.9.6
+    container_name: infrasense-promtail
+    restart: unless-stopped
+    command: -config.file=/etc/promtail/config.yml
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - ./deploy/promtail/config.yml:/etc/promtail/config.yml:ro
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:9080/ready"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+    networks:
+      - infrasense
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+    depends_on:
+      loki:
+        condition: service_started
+
+  prometheus:
+    image: prom/prometheus:v2.51.0
+    container_name: infrasense-prometheus
+    restart: unless-stopped
+    command:
+      - "--config.file=/etc/prometheus/prometheus.yml"
+      - "--storage.tsdb.path=/prometheus"
+      - "--web.console.libraries=/usr/share/prometheus/console_libraries"
+      - "--web.console.templates=/usr/share/prometheus/consoles"
+      - "--web.enable-lifecycle"
+    volumes:
+      - prometheus_data:/prometheus
+      - ./deploy/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./deploy/prometheus/alert_rules.yml:/etc/prometheus/alert_rules.yml:ro
+      - ./deploy/prometheus/targets:/etc/prometheus/targets:ro
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://127.0.0.1:9090/-/healthy"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+    networks:
+      - infrasense
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+    depends_on:
+      victoriametrics:
+        condition: service_started
+      alertmanager:
+        condition: service_started
+
+  alertmanager:
+    image: prom/alertmanager:v0.27.0
+    container_name: infrasense-alertmanager
+    restart: unless-stopped
+    command:
+      - "--config.file=/etc/alertmanager/alertmanager.yml"
+      - "--storage.path=/alertmanager"
+    volumes:
+      - alertmanager_data:/alertmanager
+      - ./deploy/alertmanager/alertmanager.yml:/etc/alertmanager/alertmanager.yml:ro
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://127.0.0.1:9093/-/healthy"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+    networks:
+      - infrasense
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+
+  grafana:
+    image: grafana/grafana:10.4.1
+    container_name: infrasense-grafana
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      GF_SECURITY_ADMIN_USER: ${GRAFANA_ADMIN_USER:-admin}
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:-Admin@123456}
+      GF_SERVER_ROOT_URL: http://${DOMAIN:-localhost}/grafana/
+      GF_SERVER_SERVE_FROM_SUB_PATH: "true"
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./deploy/grafana/dashboards:/etc/grafana/provisioning/dashboards:ro
+      - ./deploy/grafana/provisioning/datasources:/etc/grafana/provisioning/datasources:ro
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://127.0.0.1:3000/api/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 60s
+    networks:
+      - infrasense
+    deploy:
+      resources:
+        limits:
+          memory: 1G
+    depends_on:
+      victoriametrics:
+        condition: service_started
+      loki:
+        condition: service_started
+
+  redis:
+    image: redis:7-alpine
+    container_name: infrasense-redis
+    restart: unless-stopped
+    command: redis-server --maxmemory-policy allkeys-lru --maxmemory 256mb
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+    networks:
+      - infrasense
+    deploy:
+      resources:
+        limits:
+          memory: 256M
+
+  # ─── Application Services ─────────────────────────────────────────────────
+
+  api-server:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    image: infrasense-backend:1.0.0
+    container_name: infrasense-api-server
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      DB_HOST: postgres
+      DB_PORT: 5432
+      DB_NAME: ${DB_NAME:-infrasense}
+      DB_USER: ${DB_USER:-infrasense}
+      DB_PASSWORD: ${DB_PASSWORD:-InfraSense@2024}
+      JWT_SECRET: ${JWT_SECRET}
+      ENCRYPTION_KEY: ${ENCRYPTION_KEY}
+      VICTORIAMETRICS_URL: http://victoriametrics:8428/api/v1/write
+      REDIS_URL: redis://redis:6379
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+      LOG_FORMAT: ${LOG_FORMAT:-json}
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://127.0.0.1:8080/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 60s
+    networks:
+      - infrasense
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+    depends_on:
+      postgres:
+        condition: service_healthy
+      victoriametrics:
+        condition: service_started
+      redis:
+        condition: service_healthy
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    image: infrasense-frontend:1.0.0
+    container_name: infrasense-frontend
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://127.0.0.1:80/"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+    networks:
+      - infrasense
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+    depends_on:
+      api-server:
+        condition: service_healthy
+
+  notification-service:
+    build:
+      context: ./notification-service
+      dockerfile: Dockerfile
+    image: infrasense-notification-service:1.0.0
+    container_name: infrasense-notification-service
+    restart: unless-stopped
+    env_file: .env
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://127.0.0.1:8080/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+    networks:
+      - infrasense
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+
+  # ─── Collectors ───────────────────────────────────────────────────────────
+
+  redfish-collector:
+    build:
+      context: ./collectors/redfish-collector
+      dockerfile: Dockerfile
+    image: infrasense-redfish-collector:1.0.0
+    container_name: infrasense-redfish-collector
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      DB_HOST: postgres
+      DB_PASSWORD: ${DB_PASSWORD:-InfraSense@2024}
+      VICTORIAMETRICS_URL: http://victoriametrics:8428/api/v1/write
+      ENCRYPTION_KEY: ${ENCRYPTION_KEY}
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://127.0.0.1:8081/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+    networks:
+      - infrasense
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+    depends_on:
+      postgres:
+        condition: service_healthy
+      victoriametrics:
+        condition: service_started
+
+  ipmi-collector:
+    build:
+      context: ./collectors/ipmi-collector
+      dockerfile: Dockerfile
+    image: infrasense-ipmi-collector:1.0.0
+    container_name: infrasense-ipmi-collector
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      DB_HOST: postgres
+      DB_PASSWORD: ${DB_PASSWORD:-InfraSense@2024}
+      VICTORIAMETRICS_URL: http://victoriametrics:8428/api/v1/write
+      ENCRYPTION_KEY: ${ENCRYPTION_KEY}
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://127.0.0.1:8080/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+    networks:
+      - infrasense
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+    depends_on:
+      postgres:
+        condition: service_healthy
+      victoriametrics:
+        condition: service_started
+
+  snmp-collector:
+    build:
+      context: ./collectors/snmp-collector
+      dockerfile: Dockerfile
+    image: infrasense-snmp-collector:1.0.0
+    container_name: infrasense-snmp-collector
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      DB_HOST: postgres
+      DB_PASSWORD: ${DB_PASSWORD:-InfraSense@2024}
+      VICTORIAMETRICS_URL: http://victoriametrics:8428/api/v1/write
+      ENCRYPTION_KEY: ${ENCRYPTION_KEY}
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://127.0.0.1:8080/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+    networks:
+      - infrasense
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+    depends_on:
+      postgres:
+        condition: service_healthy
+      victoriametrics:
+        condition: service_started
+
+  proxmox-collector:
+    build:
+      context: ./collectors/proxmox-collector
+      dockerfile: Dockerfile
+    image: infrasense-proxmox-collector:1.0.0
+    container_name: infrasense-proxmox-collector
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      DB_HOST: postgres
+      DB_PASSWORD: ${DB_PASSWORD:-InfraSense@2024}
+      VICTORIAMETRICS_URL: http://victoriametrics:8428/api/v1/write
+      ENCRYPTION_KEY: ${ENCRYPTION_KEY}
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://127.0.0.1:8080/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+    networks:
+      - infrasense
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+    depends_on:
+      postgres:
+        condition: service_healthy
+      victoriametrics:
+        condition: service_started
+
+  # ─── Reverse Proxy ────────────────────────────────────────────────────────
+
+  nginx:
+    image: nginx:1.25-alpine
+    container_name: infrasense-nginx
+    restart: unless-stopped
+    ports:
+      - "${HTTP_PORT:-80}:80"
+    volumes:
+      - ./deploy/nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://127.0.0.1:80/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+    networks:
+      - infrasense
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+    depends_on:
+      api-server:
+        condition: service_healthy
+      grafana:
+        condition: service_started
+      frontend:
+        condition: service_started
+
+volumes:
+  postgres_data:
+  victoriametrics_data:
+  loki_data:
+  alertmanager_data:
+  prometheus_data:
+  grafana_data:
+  redis_data:
+
+networks:
+  infrasense:
+    driver: bridge

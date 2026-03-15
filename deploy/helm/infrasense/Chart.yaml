@@ -1,0 +1,17 @@
+apiVersion: v2
+name: infrasense
+description: InfraSense - Infrastructure Hardware Monitoring Platform
+type: application
+version: 1.0.0
+appVersion: "1.0.0"
+keywords:
+  - monitoring
+  - hardware
+  - ipmi
+  - redfish
+  - snmp
+  - infrastructure
+home: https://github.com/your-org/infrasense
+maintainers:
+  - name: InfraSense Team
+dependencies: []

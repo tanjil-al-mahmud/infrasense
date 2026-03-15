@@ -1,0 +1,67 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: infrasense-config
+  namespace: infrasense
+  labels:
+    app: infrasense
+    component: config
+data:
+  # Database connection (non-sensitive)
+  DB_HOST: "postgres"
+  DB_PORT: "5432"
+  DB_NAME: "infrasense"
+
+  # VictoriaMetrics
+  VICTORIAMETRICS_URL: "http://victoriametrics:8428/api/v1/write"
+  VICTORIAMETRICS_QUERY_URL: "http://victoriametrics:8428"
+
+  # Redis
+  REDIS_URL: "redis://redis:6379"
+
+  # Logging
+  LOG_LEVEL: "info"
+  LOG_FORMAT: "json"
+
+  # API Server
+  API_PORT: "8080"
+  API_BASE_PATH: "/api/v1"
+
+  # Collector polling intervals
+  POLLING_INTERVAL: "60s"
+  RELOAD_INTERVAL: "5m"
+  MAX_RETRY_INTERVAL: "10m"
+
+  # Health check
+  HEALTH_PORT: "8080"
+  HEALTH_PATH: "/health"
+
+  # Alertmanager
+  ALERTMANAGER_URL: "http://alertmanager:9093"
+
+  # Prometheus
+  PROMETHEUS_URL: "http://prometheus:9090"
+
+  # Loki
+  LOKI_URL: "http://loki:3100"
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: infrasense-collector-config
+  namespace: infrasense
+  labels:
+    app: infrasense
+    component: config
+data:
+  # Shared collector configuration
+  DB_HOST: "postgres"
+  DB_PORT: "5432"
+  DB_NAME: "infrasense"
+  VICTORIAMETRICS_URL: "http://victoriametrics:8428/api/v1/write"
+  LOG_LEVEL: "info"
+  LOG_FORMAT: "json"
+  POLLING_INTERVAL: "60s"
+  RELOAD_INTERVAL: "5m"
+  MAX_RETRY_INTERVAL: "10m"
+  MAX_CONCURRENT_POLLS: "100"

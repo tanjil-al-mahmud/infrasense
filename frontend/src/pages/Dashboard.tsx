@@ -4,10 +4,12 @@ import {
   AreaChart, Area, BarChart, Bar, XAxis, YAxis,
   Tooltip, ResponsiveContainer, Cell,
 } from 'recharts';
+import { useQuery } from '@tanstack/react-query';
 import { useDevices } from '../hooks/useDevices';
 import { useAlerts } from '../hooks/useAlerts';
-import { DeviceStatus } from '../types/device';
+import { DeviceStatus, DeviceLogEntry } from '../types/device';
 import { AlertSeverity, Alert } from '../types/alert';
+import { fetchDeviceLogs } from '../services/deviceApi';
 
 /**
  * Dashboard – production-grade infrastructure monitoring overview.
@@ -175,6 +177,110 @@ const ServerDot: React.FC<ServerDotProps> = ({ device }) => {
   );
 };
 
+// ── CriticalEventsPanel ──────────────────────────────────────────────────────
+
+interface CriticalEventRowProps {
+  entry: DeviceLogEntry & { hostname: string };
+}
+
+const CriticalEventRow: React.FC<CriticalEventRowProps> = ({ entry }) => {
+  const isCritical = entry.severity === 'Critical';
+  const c = isCritical
+    ? { bg: '#450a0a', border: '#dc2626', text: '#f87171', badge: '#991b1b' }
+    : { bg: '#422006', border: '#d97706', text: '#fbbf24', badge: '#92400e' };
+
+  return (
+    <div style={{
+      background: c.bg, border: `1px solid ${c.border}`, borderRadius: 8,
+      padding: '0.65rem 1rem', display: 'flex', alignItems: 'flex-start', gap: 10,
+    }}>
+      <span style={{
+        marginTop: 3, width: 8, height: 8, borderRadius: '50%',
+        background: c.text, boxShadow: `0 0 8px ${c.text}`, flexShrink: 0,
+      }} />
+      <div style={{ flex: 1, minWidth: 0 }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+          <span style={{
+            fontSize: '0.7rem', fontWeight: 700, color: c.text,
+            background: c.badge, borderRadius: 9999, padding: '1px 7px',
+            textTransform: 'uppercase', letterSpacing: '0.06em', flexShrink: 0,
+          }}>{entry.severity}</span>
+          <span style={{ fontSize: '0.8rem', fontWeight: 700, color: '#94a3b8', flexShrink: 0 }}>{entry.hostname}</span>
+          <span style={{ fontSize: '0.85rem', color: '#e2e8f0', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{entry.message}</span>
+        </div>
+        <div style={{ fontSize: '0.7rem', color: '#64748b', marginTop: 3 }}>
+          {new Date(entry.timestamp).toLocaleString()}
+        </div>
+      </div>
+    </div>
+  );
+};
+
+interface CriticalEventsPanelProps {
+  devices: Array<{ id: string; hostname: string; status: DeviceStatus }>;
+}
+
+const CriticalEventsPanel: React.FC<CriticalEventsPanelProps> = ({ devices }) => {
+  // Filter to critical/warning devices, take up to 5
+  const targetDevices = useMemo(
+    () => devices.filter(d => d.status === 'critical' || d.status === 'warning').slice(0, 5),
+    [devices]
+  );
+
+  // Fetch logs for each target device
+  const logQueries = targetDevices.map(device =>
+    // eslint-disable-next-line react-hooks/rules-of-hooks
+    useQuery({
+      queryKey: ['device-logs', device.id, 'critical-warning'],
+      queryFn: () => fetchDeviceLogs(device.id, { severity: 'warning', limit: 20 }),
+      enabled: targetDevices.length > 0,
+      refetchInterval: 60000,
+    })
+  );
+
+  const isLoading = logQueries.some(q => q.isLoading);
+
+  // Merge and sort all log entries, attaching hostname
+  const mergedEntries = useMemo(() => {
+    const entries: Array<DeviceLogEntry & { hostname: string }> = [];
+    logQueries.forEach((q, i) => {
+      const hostname = targetDevices[i]?.hostname ?? 'Unknown';
+      const logs = q.data?.logs ?? [];
+      // Include Critical and Warning entries
+      logs
+        .filter(l => l.severity === 'Critical' || l.severity === 'Warning')
+        .forEach(l => entries.push({ ...l, hostname }));
+    });
+    return entries.sort(
+      (a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime()
+    );
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [logQueries.map(q => q.data).join(','), targetDevices]);
+
+  return (
+    <div style={s.card}>
+      <div style={s.cardHeader}>
+        <span style={s.cardTitle}>🔴 Critical Events</span>
+        <span style={s.cardMeta}>SEL &amp; lifecycle logs · auto-refreshes every 60s</span>
+      </div>
+      {isLoading ? (
+        <p style={s.muted}>Loading critical events…</p>
+      ) : mergedEntries.length === 0 ? (
+        <div style={s.allClear}>
+          <span style={{ fontSize: '2rem' }}>✅</span>
+          <span style={{ color: '#4ade80', fontWeight: 600 }}>No critical events</span>
+        </div>
+      ) : (
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+          {mergedEntries.map(entry => (
+            <CriticalEventRow key={`${entry.hostname}-${entry.id}`} entry={entry} />
+          ))}
+        </div>
+      )}
+    </div>
+  );
+};
+
 // ── main component ───────────────────────────────────────────────────────────
 
 const Dashboard: React.FC = () => {
@@ -297,7 +403,10 @@ const Dashboard: React.FC = () => {
         </div>
       </div>
 
-      {/* ── 3. Critical Event & Alert Panel + Alert bar chart ── */}
+      {/* ── 3. Critical Events Panel (SEL/lifecycle logs) ── */}
+      <CriticalEventsPanel devices={devices} />
+
+      {/* ── 4. Critical Event & Alert Panel + Alert bar chart ── */}
       <div style={s.twoCol}>
         <div style={{ ...s.card, flex: 2 }}>
           <div style={s.cardHeader}>

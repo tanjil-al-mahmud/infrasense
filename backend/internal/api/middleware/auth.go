@@ -36,7 +36,7 @@ func AuthMiddleware(jwtService *auth.JWTService) gin.HandlerFunc {
 		// Validate token
 		claims, err := jwtService.ValidateToken(tokenString)
 		if err != nil {
-			c.JSON(http.StatusUnauthorized, gin.H{"error": "Invalid or expired token", "code": "UNAUTHORIZED"})
+			c.JSON(http.StatusUnauthorized, gin.H{"error": "Unauthorized"})
 			c.Abort()
 			return
 		}
@@ -44,7 +44,7 @@ func AuthMiddleware(jwtService *auth.JWTService) gin.HandlerFunc {
 		// Store claims in context
 		c.Set("user_id", claims.UserID)
 		c.Set("username", claims.Username)
-		c.Set("role", claims.Role)
+		c.Set("user_role", claims.Role)
 
 		c.Next()
 	}

@@ -1,3 +1,11 @@
+# InfraSense Platform - Legacy Deploy Directory Compose
+# NOTE: The canonical docker-compose.yml is now at the project root (infrasense/).
+# Run from the project root: docker compose up -d
+# This file is kept for reference only.
+#
+# If running from this directory:
+#   docker compose --env-file ../.env up -d
+
 services:
   postgres:
     image: postgres:15-alpine

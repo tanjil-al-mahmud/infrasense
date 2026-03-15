@@ -1,6 +1,7 @@
 package handlers
 
 import (
+	"log"
 	"net/http"
 	"time"
 
@@ -31,51 +32,70 @@ func NewAuthHandler(userRepo *db.UserRepository, jwtService *auth.JWTService, au
 func (h *AuthHandler) Login(c *gin.Context) {
 	var req models.LoginRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
+		log.Printf("[AUTH] Login failed - invalid request body: %v", err)
 		response.BadRequest(c, err.Error(), "INVALID_REQUEST")
 		return
 	}
 
-	// Get user by username
+	log.Printf("[AUTH] Login attempt for username=%q from IP=%s", req.Username, c.ClientIP())
+
+	// Find user by username
 	user, err := h.userRepo.GetByUsername(c.Request.Context(), req.Username)
 	if err != nil {
-		// Log failed login attempt
+		log.Printf("[AUTH] Login failed - user not found: username=%q, error=%v", req.Username, err)
 		h.auditService.LogUserLoginFailed(c.Request.Context(), req.Username, c.ClientIP())
-		// Don't reveal if user exists or not
-		response.Unauthorized(c, "Invalid username or password")
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "Invalid username or password"})
 		return
 	}
+
+	log.Printf("[AUTH] User found: id=%s, username=%q, role=%s, enabled=%v", user.ID, user.Username, user.Role, user.Enabled)
 
 	// Check if user is enabled
 	if !user.Enabled {
+		log.Printf("[AUTH] Login failed - account disabled: username=%q", req.Username)
 		h.auditService.LogUserLoginFailed(c.Request.Context(), req.Username, c.ClientIP())
-		response.Error(c, http.StatusUnauthorized, "User account is disabled", "ACCOUNT_DISABLED")
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "Invalid username or password"})
 		return
 	}
 
-	// Verify password
+	// Compare password using bcrypt
 	if err := auth.VerifyPassword(req.Password, user.PasswordHash); err != nil {
+		log.Printf("[AUTH] Login failed - password mismatch: username=%q, error=%v", req.Username, err)
 		h.auditService.LogUserLoginFailed(c.Request.Context(), req.Username, c.ClientIP())
-		response.Unauthorized(c, "Invalid username or password")
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "Invalid username or password"})
 		return
 	}
 
-	// Generate JWT token
+	// Generate JWT token with 24h expiry
 	token, err := h.jwtService.GenerateToken(user.ID, user.Username, user.Role)
 	if err != nil {
+		log.Printf("[AUTH] Login failed - token generation error: username=%q, error=%v", req.Username, err)
 		response.InternalError(c, "Failed to generate token")
 		return
 	}
 
+	// Update last_login_at if the column exists
+	if err := h.userRepo.UpdateLastLoginAt(c.Request.Context(), user.ID); err != nil {
+		log.Printf("[AUTH] Warning - failed to update last_login_at: username=%q, error=%v", req.Username, err)
+		// Non-fatal: continue with login
+	}
+
 	// Log successful login
-	h.auditService.LogUserLogin(c.Request.Context(), user.ID, user.Username, c.ClientIP())
+	if err := h.auditService.LogUserLogin(c.Request.Context(), user.ID, user.Username, c.ClientIP()); err != nil {
+		log.Printf("[AUTH] Warning - failed to write audit log: username=%q, error=%v", req.Username, err)
+	}
 
-	// Remove password hash from response
-	user.PasswordHash = ""
+	log.Printf("[AUTH] Login successful: username=%q, role=%s, id=%s", user.Username, user.Role, user.ID)
 
-	// Login response is returned directly (not wrapped in data) per spec
-	c.JSON(http.StatusOK, models.LoginResponse{
-		Token: token,
-		User:  *user,
+	// Return token and user info (password hash excluded via json:"-" tag)
+	c.JSON(http.StatusOK, gin.H{
+		"token": token,
+		"user": gin.H{
+			"id":       user.ID,
+			"username": user.Username,
+			"role":     user.Role,
+			"email":    user.Email,
+		},
 	})
 }
 
@@ -136,7 +156,7 @@ func (h *AuthHandler) CreateUser(c *gin.Context) {
 		ID:           uuid.New(),
 		Username:     req.Username,
 		PasswordHash: passwordHash,
-		Email:        req.Email,
+		Email:        &req.Email,
 		Role:         req.Role,
 		Enabled:      true,
 		CreatedAt:    time.Now(),

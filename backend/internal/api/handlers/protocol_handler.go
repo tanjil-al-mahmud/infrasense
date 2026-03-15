@@ -1,4 +1,4 @@
-﻿package handlers
+package handlers
 
 import (
 	"net/http"
@@ -22,6 +22,8 @@ func (h *ProtocolHandler) DetectProtocol(c *gin.Context) {
 	var req struct {
 		BMCIP          string `json:"bmc_ip" binding:"required"`
 		TimeoutSeconds int    `json:"timeout_seconds"`
+		Username       string `json:"username,omitempty"`
+		Password       string `json:"password,omitempty"`
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "bmc_ip is required"})
@@ -31,6 +33,6 @@ func (h *ProtocolHandler) DetectProtocol(c *gin.Context) {
 		req.TimeoutSeconds = 5
 	}
 
-	result := h.detector.Detect(c.Request.Context(), req.BMCIP)
+	result := h.detector.Detect(c.Request.Context(), req.BMCIP, req.Username, req.Password)
 	c.JSON(http.StatusOK, result)
 }

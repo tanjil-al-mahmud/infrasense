@@ -26,17 +26,13 @@ func NewCache() *Cache {
 	cache := &Cache{
 		entries: make(map[string]*cacheEntry),
 	}
-
-	// Start cleanup goroutine
 	go cache.cleanupLoop()
-
 	return cache
 }
 
 func (c *Cache) cleanupLoop() {
 	ticker := time.NewTicker(1 * time.Minute)
 	defer ticker.Stop()
-
 	for range ticker.C {
 		c.cleanup()
 	}
@@ -45,7 +41,6 @@ func (c *Cache) cleanupLoop() {
 func (c *Cache) cleanup() {
 	c.mutex.Lock()
 	defer c.mutex.Unlock()
-
 	now := time.Now()
 	for key, entry := range c.entries {
 		if now.After(entry.expiresAt) {
@@ -57,39 +52,37 @@ func (c *Cache) cleanup() {
 func (c *Cache) get(key string) (*cacheEntry, bool) {
 	c.mutex.RLock()
 	defer c.mutex.RUnlock()
-
 	entry, exists := c.entries[key]
-	if !exists {
+	if !exists || time.Now().After(entry.expiresAt) {
 		return nil, false
 	}
-
-	if time.Now().After(entry.expiresAt) {
-		return nil, false
-	}
-
 	return entry, true
 }
 
 func (c *Cache) set(key string, entry *cacheEntry) {
 	c.mutex.Lock()
 	defer c.mutex.Unlock()
-
 	c.entries[key] = entry
 }
 
-// CacheMiddleware creates a caching middleware with specified TTL
+// Invalidate removes a cache entry by key prefix (URL).
+func (c *Cache) Invalidate(urlPrefix string) {
+	key := generateCacheKey(urlPrefix)
+	c.mutex.Lock()
+	defer c.mutex.Unlock()
+	delete(c.entries, key)
+}
+
+// CacheMiddleware caches GET responses for the given TTL.
 func CacheMiddleware(cache *Cache, ttl time.Duration) gin.HandlerFunc {
 	return func(c *gin.Context) {
-		// Only cache GET requests
 		if c.Request.Method != "GET" {
 			c.Next()
 			return
 		}
 
-		// Generate cache key from URL and query parameters
 		cacheKey := generateCacheKey(c.Request.URL.String())
 
-		// Check if cached response exists
 		if entry, exists := cache.get(cacheKey); exists {
 			c.Header("X-Cache", "HIT")
 			c.Data(entry.statusCode, entry.contentType, entry.body)
@@ -97,25 +90,21 @@ func CacheMiddleware(cache *Cache, ttl time.Duration) gin.HandlerFunc {
 			return
 		}
 
-		// Create a response writer wrapper to capture the response
 		writer := &responseWriter{
 			ResponseWriter: c.Writer,
 			body:           &bytes.Buffer{},
 		}
 		c.Writer = writer
-
 		c.Header("X-Cache", "MISS")
 		c.Next()
 
-		// Cache the response if status is 200
 		if writer.Status() == 200 {
-			entry := &cacheEntry{
+			cache.set(cacheKey, &cacheEntry{
 				statusCode:  writer.Status(),
 				contentType: writer.Header().Get("Content-Type"),
 				body:        writer.body.Bytes(),
 				expiresAt:   time.Now().Add(ttl),
-			}
-			cache.set(cacheKey, entry)
+			})
 		}
 	}
 }

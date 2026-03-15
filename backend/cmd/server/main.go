@@ -10,12 +10,10 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/google/uuid"
 	"github.com/infrasense/backend/internal/api"
 	"github.com/infrasense/backend/internal/auth"
 	"github.com/infrasense/backend/internal/config"
 	"github.com/infrasense/backend/internal/db"
-	"github.com/infrasense/backend/internal/models"
 )
 
 func main() {
@@ -87,7 +85,6 @@ func main() {
 	deviceRepo := db.NewDeviceRepository(database)
 	go runAgentTimeoutDetection(agentTimeoutCtx, deviceRepo)
 
-
 	// Wait for interrupt signal for graceful shutdown
 	quit := make(chan os.Signal, 1)
 	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
@@ -98,8 +95,8 @@ func main() {
 	// Cancel background jobs
 	cancelAgentTimeout()
 
-	// Graceful shutdown with 5 second timeout
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	// Graceful shutdown with 30 second timeout
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
 	if err := httpServer.Shutdown(ctx); err != nil {
@@ -109,50 +106,48 @@ func main() {
 	log.Println("Server exited")
 }
 
-// seedAdminUser ensures at least one admin user exists in the database.
-// If no users exist, it creates the default admin account.
-// Credentials: admin / Admin@123456
+// seedAdminUser ensures the admin user exists in the database.
+// It checks specifically for username='admin' and creates it if absent.
+// The password is read from ADMIN_PASSWORD env var.
 func seedAdminUser(ctx context.Context, userRepo *db.UserRepository) error {
-	// Check if any users exist
-	users, err := userRepo.List(ctx)
+	// Check if admin user already exists
+	var count int
+	err := userRepo.Conn().QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM users WHERE username = 'admin'`,
+	).Scan(&count)
 	if err != nil {
-		return fmt.Errorf("failed to list users: %w", err)
+		return fmt.Errorf("failed to check for admin user: %w", err)
 	}
 
-	if len(users) > 0 {
-		log.Printf("Admin seed: %d user(s) already exist, skipping seed", len(users))
+	if count > 0 {
+		log.Println("Admin seed: admin user already exists, skipping")
 		return nil
 	}
 
-	log.Println("No users found — seeding default admin user...")
+	// Read password from environment
+	adminPassword := os.Getenv("ADMIN_PASSWORD")
+	if adminPassword == "" {
+		adminPassword = "Admin@123456"
+	}
 
-	// Generate bcrypt hash for default password
-	passwordHash, err := auth.HashPassword("Admin@123456")
+	passwordHash, err := auth.HashPassword(adminPassword)
 	if err != nil {
-		return fmt.Errorf("failed to hash password: %w", err)
+		return fmt.Errorf("failed to hash admin password: %w", err)
 	}
 
-	now := time.Now()
-	adminEmail := "admin@infrasense.local"
-	adminUser := &models.User{
-		ID:           uuid.New(),
-		Username:     "admin",
-		Email:        &adminEmail,
-		PasswordHash: passwordHash,
-		Role:         models.RoleAdmin,
-		Enabled:      true,
-		CreatedAt:    now,
-		UpdatedAt:    now,
-	}
-
-	if err := userRepo.Create(ctx, adminUser); err != nil {
+	// Insert admin user; ON CONFLICT (username) DO NOTHING guards against races
+	_, err = userRepo.Conn().ExecContext(ctx, `
+		INSERT INTO users (id, username, email, password_hash, role, enabled, created_at, updated_at)
+		VALUES (gen_random_uuid(), 'admin', 'admin@infrasense.local', $1, 'admin', true, NOW(), NOW())
+		ON CONFLICT (username) DO NOTHING
+	`, passwordHash)
+	if err != nil {
 		return fmt.Errorf("failed to create admin user: %w", err)
 	}
 
 	log.Println("==================================================")
 	log.Println("  Default admin user created successfully")
 	log.Println("  Username: admin")
-	log.Println("  Password: Admin@123456")
 	log.Println("  IMPORTANT: Change this password after first login!")
 	log.Println("==================================================")
 	return nil

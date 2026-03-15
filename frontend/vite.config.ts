@@ -1,8 +1,9 @@
-import { defineConfig } from 'vite';
+/// <reference types="vitest" />
+import { defineConfig, splitVendorChunkPlugin } from 'vite';
 import react from '@vitejs/plugin-react';
 
 export default defineConfig({
-  plugins: [react()],
+  plugins: [react(), splitVendorChunkPlugin()],
   server: {
     port: 3000,
     proxy: {
@@ -11,6 +12,15 @@ export default defineConfig({
         changeOrigin: true,
       },
     },
+  },
+  build: {
+    rollupOptions: {
+      output: {
+        manualChunks: {
+          vendor: ['react', 'react-dom', 'react-router-dom', '@tanstack/react-query'],
+        }
+      }
+    }
   },
   test: {
     globals: true,

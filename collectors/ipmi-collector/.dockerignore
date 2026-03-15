@@ -1,0 +1,10 @@
+.git
+.gitignore
+*.md
+*.exe
+bin/
+vendor/
+coverage.out
+*.test
+.idea/
+.vscode/

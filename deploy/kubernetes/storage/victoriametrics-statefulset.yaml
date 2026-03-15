@@ -1,0 +1,87 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: victoriametrics
+  namespace: infrasense
+  labels:
+    app: victoriametrics
+    component: storage
+spec:
+  clusterIP: None
+  selector:
+    app: victoriametrics
+  ports:
+    - port: 8428
+      name: http
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: victoriametrics
+  namespace: infrasense
+  labels:
+    app: victoriametrics
+    component: storage
+spec:
+  serviceName: victoriametrics
+  replicas: 1
+  selector:
+    matchLabels:
+      app: victoriametrics
+  template:
+    metadata:
+      labels:
+        app: victoriametrics
+        component: storage
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        fsGroup: 1000
+      containers:
+        - name: victoriametrics
+          image: victoriametrics/victoria-metrics:latest
+          args:
+            - -storageDataPath=/storage
+            - -retentionPeriod=90d
+            - -httpListenAddr=:8428
+          ports:
+            - containerPort: 8428
+              name: http
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8428
+            initialDelaySeconds: 30
+            periodSeconds: 30
+            timeoutSeconds: 10
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8428
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3
+          resources:
+            requests:
+              memory: "512Mi"
+              cpu: "250m"
+            limits:
+              memory: "4Gi"
+              cpu: "2000m"
+          volumeMounts:
+            - name: victoriametrics-data
+              mountPath: /storage
+  volumeClaimTemplates:
+    - metadata:
+        name: victoriametrics-data
+        labels:
+          app: victoriametrics
+      spec:
+        accessModes:
+          - ReadWriteOnce
+        resources:
+          requests:
+            storage: 50Gi

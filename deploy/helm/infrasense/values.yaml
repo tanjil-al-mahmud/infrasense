@@ -1,0 +1,233 @@
+# InfraSense Helm Chart Default Values
+
+global:
+  imageRegistry: ""
+  imageTag: "1.0.0"
+  imagePullPolicy: IfNotPresent
+  namespace: infrasense
+
+# -- Namespace to deploy into
+namespaceCreate: true
+
+# -- Image registry prefix (e.g. "registry.example.com/")
+imagePrefix: ""
+
+# ─── API Server ───────────────────────────────────────────────────────────────
+apiServer:
+  enabled: true
+  image: infrasense-backend
+  replicas: 2
+  port: 8080
+  resources:
+    requests:
+      memory: "128Mi"
+      cpu: "100m"
+    limits:
+      memory: "512Mi"
+      cpu: "500m"
+  env:
+    logLevel: info
+    logFormat: json
+
+# ─── Frontend ─────────────────────────────────────────────────────────────────
+frontend:
+  enabled: true
+  image: infrasense-frontend
+  replicas: 2
+  port: 80
+  resources:
+    requests:
+      memory: "64Mi"
+      cpu: "50m"
+    limits:
+      memory: "512Mi"
+      cpu: "500m"
+
+# ─── Notification Service ─────────────────────────────────────────────────────
+notificationService:
+  enabled: true
+  image: infrasense-notification-service
+  replicas: 1
+  port: 8080
+  resources:
+    requests:
+      memory: "64Mi"
+      cpu: "50m"
+    limits:
+      memory: "512Mi"
+      cpu: "500m"
+  env:
+    logLevel: info
+    logFormat: json
+
+# ─── Discovery Engine ─────────────────────────────────────────────────────────
+discoveryEngine:
+  enabled: true
+  image: infrasense-discovery-engine
+  replicas: 1
+  port: 8080
+  resources:
+    requests:
+      memory: "64Mi"
+      cpu: "50m"
+    limits:
+      memory: "512Mi"
+      cpu: "500m"
+  env:
+    logLevel: info
+    logFormat: json
+
+# ─── Collectors ───────────────────────────────────────────────────────────────
+collectors:
+  ipmi:
+    enabled: true
+    image: infrasense-ipmi-collector
+    replicas: 1
+    port: 8080
+    resources:
+      requests:
+        memory: "64Mi"
+        cpu: "50m"
+      limits:
+        memory: "512Mi"
+        cpu: "500m"
+
+  redfish:
+    enabled: true
+    image: infrasense-redfish-collector
+    replicas: 1
+    port: 8081
+    resources:
+      requests:
+        memory: "64Mi"
+        cpu: "50m"
+      limits:
+        memory: "512Mi"
+        cpu: "500m"
+
+  snmp:
+    enabled: true
+    image: infrasense-snmp-collector
+    replicas: 1
+    port: 8082
+    resources:
+      requests:
+        memory: "64Mi"
+        cpu: "50m"
+      limits:
+        memory: "512Mi"
+        cpu: "500m"
+
+  proxmox:
+    enabled: true
+    image: infrasense-proxmox-collector
+    replicas: 1
+    port: 8083
+    resources:
+      requests:
+        memory: "64Mi"
+        cpu: "50m"
+      limits:
+        memory: "512Mi"
+        cpu: "500m"
+
+  ssh:
+    enabled: true
+    image: infrasense-ssh-collector
+    replicas: 1
+    port: 8084
+    resources:
+      requests:
+        memory: "64Mi"
+        cpu: "50m"
+      limits:
+        memory: "512Mi"
+        cpu: "500m"
+
+  http:
+    enabled: true
+    image: infrasense-http-collector
+    replicas: 1
+    port: 8085
+    resources:
+      requests:
+        memory: "64Mi"
+        cpu: "50m"
+      limits:
+        memory: "512Mi"
+        cpu: "500m"
+
+# ─── PostgreSQL ───────────────────────────────────────────────────────────────
+postgres:
+  enabled: true
+  image: postgres:15-alpine
+  storage: 20Gi
+  storageClassName: ""
+  resources:
+    requests:
+      memory: "256Mi"
+      cpu: "250m"
+    limits:
+      memory: "2Gi"
+      cpu: "2000m"
+  database: infrasense
+  user: infrasense
+
+# ─── VictoriaMetrics ──────────────────────────────────────────────────────────
+victoriametrics:
+  enabled: true
+  image: victoriametrics/victoria-metrics:latest
+  storage: 50Gi
+  storageClassName: ""
+  retentionPeriod: 90d
+  resources:
+    requests:
+      memory: "512Mi"
+      cpu: "250m"
+    limits:
+      memory: "4Gi"
+      cpu: "2000m"
+
+# ─── Redis ────────────────────────────────────────────────────────────────────
+redis:
+  enabled: true
+  image: redis:7-alpine
+  maxmemory: 256mb
+  resources:
+    requests:
+      memory: "64Mi"
+      cpu: "50m"
+    limits:
+      memory: "512Mi"
+      cpu: "500m"
+
+# ─── Ingress ──────────────────────────────────────────────────────────────────
+ingress:
+  enabled: true
+  className: nginx
+  host: infrasense.example.com
+  tls:
+    enabled: true
+    secretName: infrasense-tls
+  annotations:
+    nginx.ingress.kubernetes.io/ssl-redirect: "true"
+    nginx.ingress.kubernetes.io/proxy-body-size: "10m"
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "60"
+    nginx.ingress.kubernetes.io/proxy-send-timeout: "60"
+
+# ─── Secrets (override at install time, never commit real values) ─────────────
+secrets:
+  # Set via --set or a separate secrets values file
+  dbPassword: ""
+  jwtSecret: ""
+  encryptionKey: ""
+  redisPassword: ""
+  # Notification channels (all optional)
+  smtpHost: ""
+  smtpPort: ""
+  smtpUsername: ""
+  smtpPassword: ""
+  smtpFrom: ""
+  telegramBotToken: ""
+  telegramChatId: ""
+  slackWebhookUrl: ""

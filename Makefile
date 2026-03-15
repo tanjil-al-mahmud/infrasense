@@ -5,7 +5,7 @@ BUILD_TIME  ?= $(shell date -u +"%Y-%m-%dT%H:%M:%SZ")
 LDFLAGS     := -ldflags "-X main.Version=$(VERSION) -X main.BuildTime=$(BUILD_TIME)"
 REGISTRY    ?= ghcr.io/infrasense
 
-COLLECTORS := ipmi-collector redfish-collector snmp-collector proxmox-collector
+COLLECTORS := ipmi-collector redfish-collector snmp-collector proxmox-collector ssh-collector
 
 .DEFAULT_GOAL := help
 
@@ -59,6 +59,11 @@ test-collectors: ## Run collector tests
 	done
 	cd notification-service && go test ./...
 
+.PHONY: smoke-test
+smoke-test: ## Run smoke tests against a running stack (BASE_URL=http://localhost)
+	@echo "Running smoke tests..."
+	bash quick-test.sh $(BASE_URL)
+
 ##@ Lint
 
 .PHONY: lint
@@ -75,9 +80,34 @@ lint: ## Run golangci-lint on all Go modules
 
 ##@ Docker
 
+.PHONY: up
+up: ## Start the full InfraSense stack (production mode)
+	docker compose up -d
+
+.PHONY: up-dev
+up-dev: ## Start the full InfraSense stack (development mode, ports exposed)
+	docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d
+
+.PHONY: down
+down: ## Stop all InfraSense containers
+	docker compose down
+
+.PHONY: logs
+logs: ## Tail logs for all services
+	docker compose logs -f
+
+.PHONY: ps
+ps: ## Show status of all containers
+	docker compose ps
+
 .PHONY: docker-build
-docker-build: ## Build all Docker images
-	@echo "Building Docker images..."
+docker-build: ## Build all Docker images via compose
+	docker compose build
+
+.PHONY: docker-build-push
+docker-build-push: ## Build and push all Docker images (requires REGISTRY env var)
+	@if [ -z "$(REGISTRY)" ]; then echo "Error: REGISTRY is not set"; exit 1; fi
+	@echo "Building and pushing Docker images to $(REGISTRY)..."
 	docker build -t $(REGISTRY)/infrasense-api:$(VERSION) \
 		--build-arg VERSION=$(VERSION) --build-arg BUILD_TIME=$(BUILD_TIME) \
 		backend/
@@ -90,11 +120,6 @@ docker-build: ## Build all Docker images
 	docker build -t $(REGISTRY)/infrasense-notification:$(VERSION) \
 		--build-arg VERSION=$(VERSION) --build-arg BUILD_TIME=$(BUILD_TIME) \
 		notification-service/
-
-.PHONY: docker-push
-docker-push: ## Push Docker images (requires REGISTRY env var)
-	@if [ -z "$(REGISTRY)" ]; then echo "Error: REGISTRY is not set"; exit 1; fi
-	@echo "Pushing Docker images to $(REGISTRY)..."
 	docker push $(REGISTRY)/infrasense-api:$(VERSION)
 	@for c in $(COLLECTORS); do \
 		docker push $(REGISTRY)/$$c:$(VERSION); \

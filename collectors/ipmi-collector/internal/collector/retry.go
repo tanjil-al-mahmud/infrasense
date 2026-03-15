@@ -87,15 +87,73 @@ func (rm *RetryManager) GetFailureCount(deviceID int64) int {
 	return state.failureCount
 }
 
+// PollDevice polls a single device by running all 5 ipmitool commands with a 30-second
+// context timeout. On any command failure it logs the command name, exit code, and stderr,
+// marks the device unavailable, and returns false. On full success it pushes all collected
+// metrics to VictoriaMetrics, marks the device healthy, and returns true.
+func (c *IPMICollector) PollDevice(device Device) bool {
+	ctx, cancel := context.WithTimeout(c.ctx, 30*time.Second)
+	defer cancel()
+
+	var allMetrics []Metric
+
+	// 1. chassis status → infrasense_ipmi_chassis_power_state
+	chassisMetrics, err := runChassisStatus(ctx, device)
+	if err != nil {
+		c.updateDeviceStatus(device.ID, "unavailable", fmt.Sprintf("chassis status failed: %v", err))
+		return false
+	}
+	allMetrics = append(allMetrics, chassisMetrics...)
+
+	// 2. sensor list → infrasense_ipmi_sensor_value
+	sensorMetrics, err := runSensorList(ctx, device)
+	if err != nil {
+		c.updateDeviceStatus(device.ID, "unavailable", fmt.Sprintf("sensor list failed: %v", err))
+		return false
+	}
+	allMetrics = append(allMetrics, sensorMetrics...)
+
+	// 3. sdr → sensor metadata enrichment (no metrics emitted directly)
+	_, err = runSDR(ctx, device)
+	if err != nil {
+		c.updateDeviceStatus(device.ID, "unavailable", fmt.Sprintf("sdr failed: %v", err))
+		return false
+	}
+
+	// 4. sel list → infrasense_ipmi_sel_entries_total{severity}
+	selMetrics, err := runSELList(ctx, device)
+	if err != nil {
+		c.updateDeviceStatus(device.ID, "unavailable", fmt.Sprintf("sel list failed: %v", err))
+		return false
+	}
+	allMetrics = append(allMetrics, selMetrics...)
+
+	// 5. fru → upsert manufacturer/product/serial into device_inventory
+	if err := runFRU(ctx, device, c.db); err != nil {
+		c.updateDeviceStatus(device.ID, "unavailable", fmt.Sprintf("fru failed: %v", err))
+		return false
+	}
+
+	// Push all collected metrics to VictoriaMetrics
+	for _, metric := range allMetrics {
+		if err := c.metricsWriter.WriteMetric(metric.Name, metric.Value, metric.Labels, metric.Timestamp); err != nil {
+			slog.Error("metric write error",
+				"event", "metric_write_error",
+				"device_id", device.ID,
+				"hostname", device.Hostname,
+				"error", err.Error())
+		}
+	}
+
+	return true
+}
+
 // PollDeviceWithRetry polls a device with exponential backoff retry logic
 func (c *IPMICollector) PollDeviceWithRetry(device Device) {
 	// Check if we should retry this device
 	if !c.retryManager.ShouldRetry(device.ID, device.Hostname) {
 		return
 	}
-
-	ctx, cancel := context.WithTimeout(c.ctx, c.timeout)
-	defer cancel()
 
 	timestamp := time.Now()
 
@@ -105,29 +163,23 @@ func (c *IPMICollector) PollDeviceWithRetry(device Device) {
 		"hostname", device.Hostname,
 		"timestamp", timestamp.Format(time.RFC3339))
 
-	// Collect IPMI data
-	data, err := CollectIPMIData(ctx, device)
-	if err != nil {
+	ok := c.PollDevice(device)
+	if !ok {
 		slog.Error("device poll failed",
 			"event", "poll_attempt",
 			"device_id", device.ID,
 			"hostname", device.Hostname,
 			"timestamp", timestamp.Format(time.RFC3339),
-			"result", "error",
-			"error", err.Error())
-
-		slog.Error("connection error",
-			"event", "connection_error",
-			"device_id", device.ID,
-			"hostname", device.Hostname,
-			"timestamp", timestamp.Format(time.RFC3339),
-			"error", err.Error())
+			"result", "error")
 
 		// Record failure and get backoff duration
 		backoff := c.retryManager.RecordFailure(device.ID, device.Hostname)
 
-		// Update device status to unavailable
-		c.updateDeviceStatus(device.ID, "unavailable", fmt.Sprintf("Connection failed: %v (retry in %v)", err, backoff))
+		slog.Warn("device marked unavailable, scheduling retry",
+			"event", "device_unavailable",
+			"device_id", device.ID,
+			"hostname", device.Hostname,
+			"retry_in_seconds", backoff.Seconds())
 
 		return
 	}
@@ -137,20 +189,7 @@ func (c *IPMICollector) PollDeviceWithRetry(device Device) {
 		"device_id", device.ID,
 		"hostname", device.Hostname,
 		"timestamp", timestamp.Format(time.RFC3339),
-		"result", "success",
-		"metrics_count", len(data.Metrics))
-
-	// Push metrics to VictoriaMetrics
-	for _, metric := range data.Metrics {
-		if err := c.metricsWriter.WriteMetric(metric.Name, metric.Value, metric.Labels, metric.Timestamp); err != nil {
-			slog.Error("metric write error",
-				"event", "metric_write_error",
-				"device_id", device.ID,
-				"hostname", device.Hostname,
-				"timestamp", time.Now().Format(time.RFC3339),
-				"error", err.Error())
-		}
-	}
+		"result", "success")
 
 	// Record success (resets failure count)
 	c.retryManager.RecordSuccess(device.ID)

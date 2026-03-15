@@ -7,6 +7,7 @@ import (
 	"log"
 	"net/http"
 	"net/url"
+	"sort"
 	"strings"
 	"time"
 
@@ -24,6 +25,7 @@ type DeviceHandler struct {
 	credRepo          *db.DeviceCredentialRepository
 	credentialService *services.CredentialService
 	redfishService    *services.RedfishService
+	ipmiService       *services.IPMIService
 	auditService      *services.AuditService
 	vmQueryURL        string // base URL for VictoriaMetrics queries (without /api/v1/write)
 }
@@ -40,6 +42,7 @@ func (h *DeviceHandler) WithCredentialSupport(credRepo *db.DeviceCredentialRepos
 	h.credRepo = credRepo
 	h.credentialService = credSvc
 	h.redfishService = services.NewRedfishService()
+	h.ipmiService = services.NewIPMIService()
 	return h
 }
 
@@ -281,7 +284,12 @@ func (h *DeviceHandler) TestConnection(c *gin.Context) {
 		password = decrypted
 	}
 
-	result := h.redfishService.TestConnection(c.Request.Context(), *device.BMCIPAddress, cred, password)
+	var result models.ConnectionTestResult
+	if device.Protocol != nil && *device.Protocol == "ipmi" {
+		result = h.ipmiService.TestConnection(c.Request.Context(), *device.BMCIPAddress, cred, password)
+	} else {
+		result = h.redfishService.TestConnection(c.Request.Context(), *device.BMCIPAddress, cred, password)
+	}
 
 	// Persist connection status
 	connStatus := "connected"
@@ -340,7 +348,13 @@ func (h *DeviceHandler) SyncDevice(c *gin.Context) {
 		password = decrypted
 	}
 
-	syncResult, err := h.redfishService.SyncDevice(c.Request.Context(), *device.BMCIPAddress, cred, password)
+	var syncResult models.DeviceSyncResult
+	if device.Protocol != nil && *device.Protocol == "ipmi" {
+		syncResult, err = h.ipmiService.SyncDevice(c.Request.Context(), *device.BMCIPAddress, cred, password)
+	} else {
+		syncResult, err = h.redfishService.SyncDevice(c.Request.Context(), *device.BMCIPAddress, cred, password)
+	}
+
 	if err != nil {
 		_ = h.repo.UpdateSyncResult(c.Request.Context(), id, "failed", err.Error())
 		syncResult.Success = false
@@ -588,6 +602,110 @@ func (h *DeviceHandler) BootControl(c *gin.Context) {
 	c.JSON(http.StatusOK, result)
 }
 
+// DeviceLogEntry is the unified log entry returned by GetDeviceLogs.
+type DeviceLogEntry struct {
+	ID        string `json:"id"`
+	Source    string `json:"source"` // "sel" or "lifecycle"
+	Severity  string `json:"severity"`
+	Message   string `json:"message"`
+	Timestamp string `json:"timestamp"`
+}
+
+// GetDeviceLogs handles GET /api/v1/devices/:id/logs
+// Query params: severity (critical|warning|all, default "all"), limit (default 50)
+func (h *DeviceHandler) GetDeviceLogs(c *gin.Context) {
+	idStr := c.Param("id")
+	id, err := uuid.Parse(idStr)
+	if err != nil {
+		response.BadRequest(c, "Invalid device ID", "INVALID_ID")
+		return
+	}
+
+	severity := c.DefaultQuery("severity", "all")
+	limitStr := c.DefaultQuery("limit", "50")
+
+	limit := 50
+	if _, err := fmt.Sscanf(limitStr, "%d", &limit); err != nil || limit < 1 {
+		limit = 50
+	}
+
+	// Verify device exists
+	if _, err := h.repo.GetByID(c.Request.Context(), id); err != nil {
+		if err.Error() == "device not found" {
+			response.NotFound(c, "Device not found")
+			return
+		}
+		response.InternalError(c, "Failed to get device")
+		return
+	}
+
+	// Query sel_entries_json and lifecycle_logs_json from device_inventory
+	var selJSON, lcJSON []byte
+	err = h.repo.DB().Conn().QueryRowContext(c.Request.Context(),
+		`SELECT COALESCE(sel_entries_json, '[]'::jsonb), COALESCE(lifecycle_logs_json, '[]'::jsonb)
+		 FROM device_inventory WHERE device_id = $1`, id,
+	).Scan(&selJSON, &lcJSON)
+	if err != nil {
+		// No inventory row — return empty logs
+		c.JSON(http.StatusOK, gin.H{"logs": []DeviceLogEntry{}, "total": 0})
+		return
+	}
+
+	var selEntries []models.SELEntry
+	var lcEntries []models.LifecycleLogEntry
+	_ = json.Unmarshal(selJSON, &selEntries)
+	_ = json.Unmarshal(lcJSON, &lcEntries)
+
+	// Merge into unified log entries
+	var logs []DeviceLogEntry
+	for _, e := range selEntries {
+		logs = append(logs, DeviceLogEntry{
+			ID:        e.ID,
+			Source:    "sel",
+			Severity:  e.Severity,
+			Message:   e.Message,
+			Timestamp: e.Created,
+		})
+	}
+	for _, e := range lcEntries {
+		logs = append(logs, DeviceLogEntry{
+			ID:        e.ID,
+			Source:    "lifecycle",
+			Severity:  e.Severity,
+			Message:   e.Message,
+			Timestamp: e.Created,
+		})
+	}
+
+	// Filter by severity if not "all"
+	if severity != "all" {
+		filtered := logs[:0]
+		for _, l := range logs {
+			if strings.EqualFold(l.Severity, severity) {
+				filtered = append(filtered, l)
+			}
+		}
+		logs = filtered
+	}
+
+	// Sort by timestamp descending (most recent first)
+	sort.Slice(logs, func(i, j int) bool {
+		return logs[i].Timestamp > logs[j].Timestamp
+	})
+
+	// Apply limit
+	total := len(logs)
+	if limit < total {
+		logs = logs[:limit]
+	}
+
+	if logs == nil {
+		logs = []DeviceLogEntry{}
+	}
+
+	c.JSON(http.StatusOK, gin.H{"logs": logs, "total": total})
+}
+
 // GetInventory handles GET /api/v1/devices/:id/inventory
 func (h *DeviceHandler) GetInventory(c *gin.Context) {
 	idStr := c.Param("id")
@@ -609,3 +727,4 @@ func (h *DeviceHandler) GetInventory(c *gin.Context) {
 
 	response.Success(c, inv)
 }
+

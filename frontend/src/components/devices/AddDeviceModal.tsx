@@ -5,9 +5,10 @@ import { useForm } from 'react-hook-form';
 
 import { useCreateDevice } from '../../hooks/useDevices';
 
-import { saveDeviceCredentials } from '../../services/deviceApi';
+import { saveDeviceCredentials, detectProtocol } from '../../services/deviceApi';
 
-import { Device } from '../../types/device';
+import { Device, ProtocolDetectionResult } from '../../types/device';
+import { useToast } from '../../contexts/ToastContext';
 
 
 
@@ -99,8 +100,8 @@ export const DEVICE_OPTIONS: DeviceOption[] = [
 
   { value: 'ieit_bmc_ipmi',        label: 'IEIT BMC (IPMI)',        vendor: 'IEIT',      mgmtController: 'BMC',     protocol: 'ipmi',    defaultPort: 623 },
 
-  // Generic SSH
-
+  // Generic Server
+  { value: 'generic_ipmi',         label: 'Generic IPMI / Legacy BMC', vendor: 'Generic',   mgmtController: 'BMC',     protocol: 'ipmi',    defaultPort: 623 },
   { value: 'generic_ssh',          label: 'Generic Server (SSH)',   vendor: 'Generic',   mgmtController: 'SSH',     protocol: 'ssh',     defaultPort: 22 },
 
   // UPS
@@ -162,6 +163,13 @@ interface AddDeviceModalProps { onClose: () => void; onSuccess: (device: Device)
 const AddDeviceModal: React.FC<AddDeviceModalProps> = ({ onClose, onSuccess }) => {
 
   const createDevice = useCreateDevice();
+  const { showToast } = useToast();
+  const [isDetecting, setIsDetecting] = useState(false);
+  const [detectionResult, setDetectionResult] = useState<ProtocolDetectionResult | null>(null);
+  const [manualMode, setManualMode] = useState(false);
+  const [scanUsername, setScanUsername] = useState('');
+  const [scanPassword, setScanPassword] = useState('');
+  const [selectedProtocol, setSelectedProtocol] = useState('');
 
   const [showBmcPw, setShowBmcPw] = useState(false);
 
@@ -171,7 +179,7 @@ const AddDeviceModal: React.FC<AddDeviceModalProps> = ({ onClose, onSuccess }) =
 
 
 
-  const { register, handleSubmit, watch, formState: { errors, isSubmitting }, setError } = useForm<FormValues>({
+  const { register, handleSubmit, watch, setValue, formState: { errors, isSubmitting }, setError } = useForm<FormValues>({
 
     defaultValues: {
 
@@ -207,27 +215,55 @@ const AddDeviceModal: React.FC<AddDeviceModalProps> = ({ onClose, onSuccess }) =
 
   const deviceInfo = DEVICE_OPTIONS.find((d) => d.value === selectedOption);
 
-  const protocol = deviceInfo?.protocol;
+  const activeProtocol = (detectionResult && !manualMode) ? selectedProtocol : deviceInfo?.protocol;
+  const protocol = activeProtocol; // Alias for JSX compatibility
 
   const defaultAgentPort = selectedOption === 'windows_agent' ? '9182' : '9100';
 
 
 
+  const handleDetect = async () => {
+    const ip = watch('ip_address');
+    if (!ip) {
+      setError('ip_address', { type: 'manual', message: 'Required for detection' });
+      return;
+    }
+    setIsDetecting(true);
+    setDetectionResult(null);
+    try {
+      const res = await detectProtocol(ip, scanUsername, scanPassword);
+      setDetectionResult(res);
+      if (res.recommended_protocol && res.recommended_protocol !== 'unknown') {
+        setSelectedProtocol(res.recommended_protocol);
+        setValue('bmc_ip', ip);
+        if (scanUsername) setValue('bmc_username', scanUsername);
+        if (scanPassword) setValue('bmc_password', scanPassword);
+      }
+      showToast('Device detection completed.', 'success');
+    } catch (err: any) {
+      showToast(err.message || 'Detection failed. Entering manual mode.', 'error');
+      setManualMode(true);
+    } finally {
+      setIsDetecting(false);
+    }
+  };
+
   const onSubmit = async (data: FormValues) => {
 
-    if (!selectedOption) { setError('device_option', { message: 'Please select a device type' }); return; }
+    if (manualMode && !selectedOption) { setError('device_option', { message: 'Please select a device type' }); return; }
+    if (!manualMode && detectionResult && !selectedProtocol) { setError('root', { message: 'Please select a protocol' }); return; }
 
-    const isBMC = protocol === 'redfish' || protocol === 'ipmi';
+    const isBMC = activeProtocol === 'redfish' || activeProtocol === 'ipmi';
 
     let primaryIP = data.ip_address;
 
     if (isBMC) primaryIP = data.bmc_ip || data.ip_address;
 
-    else if (protocol === 'proxmox') primaryIP = data.proxmox_ip || data.ip_address;
+    else if (activeProtocol === 'proxmox') primaryIP = data.proxmox_ip || data.ip_address;
 
-    else if (protocol === 'agent') primaryIP = data.agent_ip || data.ip_address;
+    else if (activeProtocol === 'agent') primaryIP = data.agent_ip || data.ip_address;
 
-    else if (protocol === 'ssh') primaryIP = data.ip_address;
+    else if (activeProtocol === 'ssh') primaryIP = data.ip_address;
 
 
 
@@ -241,17 +277,17 @@ const AddDeviceModal: React.FC<AddDeviceModalProps> = ({ onClose, onSuccess }) =
 
         bmc_ip_address: isBMC ? (data.bmc_ip || undefined) : undefined,
 
-        device_type: selectedOption,
+        device_type: (detectionResult && !manualMode && activeProtocol) ? `${detectionResult.vendor || 'auto'}_${activeProtocol}`.toLowerCase() : selectedOption,
 
-        vendor: deviceInfo?.vendor,
+        vendor: (detectionResult && !manualMode) ? detectionResult.vendor : deviceInfo?.vendor,
 
-        management_controller: deviceInfo?.mgmtController,
+        management_controller: (detectionResult && !manualMode) ? detectionResult.bmc_type : deviceInfo?.mgmtController,
 
-        protocol: protocol,
+        protocol: activeProtocol,
 
         polling_interval: data.polling_interval ? parseInt(data.polling_interval, 10) : 60,
 
-        ssl_verify: protocol === 'redfish' ? !data.skip_tls : undefined,
+        ssl_verify: activeProtocol === 'redfish' ? !data.skip_tls : undefined,
 
         location: data.location || undefined,
 
@@ -381,9 +417,68 @@ const AddDeviceModal: React.FC<AddDeviceModalProps> = ({ onClose, onSuccess }) =
 
 
 
+          {/* DETECTION BLOCK */}
+          <div style={{ backgroundColor: '#1e293b', padding: '1rem', borderRadius: '8px', border: '1px solid #334155' }}>
+            <h3 style={{ margin: '0 0 0.75rem', fontSize: '0.875rem', color: '#e2e8f0', fontWeight: 600 }}>Auto Detect Capabilities</h3>
+            {!detectionResult && !manualMode && (
+              <>
+                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '0.75rem', marginBottom: '0.75rem' }}>
+                  <input style={inp(false)} placeholder="BMC Username (optional)" value={scanUsername} onChange={e => setScanUsername(e.target.value)} />
+                  <input type="password" style={inp(false)} placeholder="BMC Password (optional)" value={scanPassword} onChange={e => setScanPassword(e.target.value)} />
+                </div>
+                <div style={{ display: 'flex', gap: '0.75rem', alignItems: 'center' }}>
+                  <button type="button" onClick={handleDetect} disabled={isDetecting} style={{ ...s.submitBtn, backgroundColor: isDetecting ? '#475569' : '#10b981' }}>
+                    {isDetecting ? 'Detecting...' : 'Detect Device'}
+                  </button>
+                  <button type="button" onClick={() => setManualMode(true)} style={{ background: 'none', border: 'none', color: '#94a3b8', fontSize: '0.8rem', cursor: 'pointer', textDecoration: 'underline' }}>
+                    Skip detection (Manual Setup)
+                  </button>
+                </div>
+              </>
+            )}
+
+            {detectionResult && !manualMode && (
+              <div style={{ display: 'flex', flexDirection: 'column', gap: '0.5rem' }}>
+                <div style={{ display: 'flex', gap: '1rem', flexWrap: 'wrap' }}>
+                  <span style={{ color: '#f8fafc', fontSize: '0.875rem' }}><strong>Vendor:</strong> {detectionResult.vendor || 'Unknown'}</span>
+                  <span style={{ color: '#f8fafc', fontSize: '0.875rem' }}><strong>Model:</strong> {detectionResult.model || 'Unknown'}</span>
+                  <span style={{ color: '#f8fafc', fontSize: '0.875rem' }}><strong>BMC:</strong> {detectionResult.bmc_type || 'Unknown'}</span>
+                </div>
+                <div style={{ fontSize: '0.875rem', color: '#cbd5e1' }}>
+                  <strong>Supported Protocols:</strong> {detectionResult.supported_protocols?.map(p => <span key={p} style={{ marginRight: '8px', color: '#4ade80' }}>✓ {p.toUpperCase()}</span>)}
+                </div>
+                
+                <div style={{ display: 'flex', gap: '0.75rem', alignItems: 'center', marginTop: '0.5rem' }}>
+                  <span style={{ color: '#94a3b8', fontSize: '0.875rem' }}>Select Protocol:</span>
+                  <select 
+                    style={{ ...inp(false), width: 'auto' }} 
+                    value={selectedProtocol} 
+                    onChange={e => setSelectedProtocol(e.target.value)}
+                  >
+                    <option value="">-- select --</option>
+                    {detectionResult.supported_protocols?.map(p => (
+                      <option key={p} value={p}>{p.toUpperCase()}</option>
+                    ))}
+                  </select>
+                  <button type="button" onClick={() => { setDetectionResult(null); setManualMode(true); }} style={s.cancelBtn}>Manual Setup Config</button>
+                </div>
+              </div>
+            )}
+            
+            {manualMode && (
+              <div style={{ display: 'flex', gap: '0.75rem', alignItems: 'center' }}>
+                <span style={{ color: '#f87171', fontSize: '0.875rem', fontWeight: 600 }}>Manual Setup Active</span>
+                <button type="button" onClick={() => { setManualMode(false); }} style={{ background: 'none', border: 'none', color: '#94a3b8', fontSize: '0.8rem', cursor: 'pointer', textDecoration: 'underline' }}>
+                  Return to Auto-Detect
+                </button>
+              </div>
+            )}
+          </div>
+
+          {manualMode && (
           <Field label="Device Type *" error={errors.device_option?.message}>
 
-            <select style={inp(!!errors.device_option)} {...register('device_option', { required: 'Required' })}>
+            <select style={inp(!!errors.device_option)} {...register('device_option', { required: !detectionResult || manualMode ? 'Required' : false })}>
 
               <option value="">— Select device type —</option>
 
@@ -404,10 +499,9 @@ const AddDeviceModal: React.FC<AddDeviceModalProps> = ({ onClose, onSuccess }) =
             </select>
 
           </Field>
+          )}
 
-
-
-          {deviceInfo && (
+          {manualMode && deviceInfo && (
 
             <div style={{ display: 'flex', gap: '0.5rem', flexWrap: 'wrap' }}>
 
@@ -415,7 +509,7 @@ const AddDeviceModal: React.FC<AddDeviceModalProps> = ({ onClose, onSuccess }) =
 
               <span style={s.badge}>Controller: {deviceInfo.mgmtController}</span>
 
-              <span style={s.badge}>Protocol: {deviceInfo.protocol.toUpperCase()}</span>
+              <span style={s.badge}>Protocol: {deviceInfo.protocol?.toUpperCase()}</span>
 
               <span style={s.badge}>Default Port: {deviceInfo.defaultPort}</span>
 

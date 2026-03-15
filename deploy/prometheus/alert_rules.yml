@@ -171,6 +171,23 @@ groups:
           metric_name: "voltage"
           current_value: "{{ $value }}"
 
+  - name: network_interface_alerts
+    interval: 1m
+    rules:
+      # Network interface error threshold - WARNING
+      - alert: NetworkInterfaceErrorsHigh
+        expr: infrasense_ssh_network_errors_total > 100
+        for: 5m
+        labels:
+          severity: warning
+          category: network
+        annotations:
+          summary: "High network interface errors on device {{ $labels.device_id }}"
+          description: "Network interface {{ $labels.interface }} on device {{ $labels.device_id }} has {{ $value }} errors (threshold: 100 per polling interval)"
+          device_id: "{{ $labels.device_id }}"
+          metric_name: "network_errors_total"
+          current_value: "{{ $value }}"
+
   - name: power_consumption_alerts
     interval: 5m
     rules:

@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useRef, useEffect } from 'react';
 import {
   BrowserRouter,
   Routes,
@@ -7,76 +7,68 @@ import {
   NavLink,
   Outlet,
   useNavigate,
+  Link,
 } from 'react-router-dom';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { AuthProvider, useAuth } from './contexts/AuthContext';
 import { ToastProvider } from './contexts/ToastContext';
+import { usePermissions } from './hooks/usePermissions';
 
 // Pages
-import Login from './pages/Login';
-import Dashboard from './pages/Dashboard';
-import Devices from './pages/Devices';
-import DeviceDetail from './pages/DeviceDetail';
-import Alerts from './pages/Alerts';
-import AlertRules from './pages/AlertRules';
+const Login = React.lazy(() => import('./pages/Login'));
+const Dashboard = React.lazy(() => import('./pages/Dashboard'));
+const Devices = React.lazy(() => import('./pages/Devices'));
+const DeviceDetail = React.lazy(() => import('./pages/DeviceDetail'));
+const Alerts = React.lazy(() => import('./pages/Alerts'));
+const AlertRules = React.lazy(() => import('./pages/AlertRules'));
+const UserManagement = React.lazy(() => import('./pages/UserManagement'));
+const UserProfile = React.lazy(() => import('./pages/UserProfile'));
 
-/**
- * App Component
- *
- * Root application component providing:
- * - React Query client
- * - Authentication context
- * - React Router v6 routing
- * - Protected routes (require authentication)
- * - Public routes (login page)
- * - Responsive layout with Tailwind CSS (hamburger menu on mobile)
- *
- * Routes:
- *   /login          → Login (public)
- *   /               → Dashboard (protected)
- *   /devices        → Devices (protected)
- *   /devices/:id    → DeviceDetail (protected)
- *   /alerts         → Alerts (protected)
- *   /alert-rules    → AlertRules (protected)
- *
- * Requirements: 20.1, 20.7
- */
+class ErrorBoundary extends React.Component<{ children: React.ReactNode }, { hasError: boolean }> {
+  constructor(props: { children: React.ReactNode }) {
+    super(props);
+    this.state = { hasError: false };
+  }
+  static getDerivedStateFromError() {
+    return { hasError: true };
+  }
+  render() {
+    if (this.state.hasError) {
+      return <div style={{ padding: 20, color: 'white' }}>Something went wrong. Please reload.</div>;
+    }
+    return this.props.children;
+  }
+}
 
 const queryClient = new QueryClient({
-  defaultOptions: {
-    queries: {
-      retry: 1,
-      staleTime: 30_000,
-    },
-  },
+  defaultOptions: { queries: { retry: 1, staleTime: 300_000 } },
 });
 
 // ── Protected Route ──────────────────────────────────────────────────────────
 
 const ProtectedRoute: React.FC = () => {
-  const { isAuthenticated, loading } = useAuth();
+  const { isAuthenticated, loading, user } = useAuth();
 
   if (loading) {
     return (
-      <div className="flex flex-col items-center justify-center min-h-screen gap-4" style={{ background: '#020617' }}>
-        <div
-          className="w-8 h-8 border-4 rounded-full"
-          style={{ borderColor: '#1e293b', borderTopColor: '#3b82f6', animation: 'spin 0.8s linear infinite' }}
-          aria-hidden="true"
-        />
-        <p className="text-sm" style={{ color: '#64748b' }}>Loading...</p>
+      <div style={{ minHeight: '100vh', display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', gap: '1rem', background: '#020617' }}>
+        <div style={{ width: 32, height: 32, border: '4px solid #1e293b', borderTopColor: '#3b82f6', borderRadius: '50%', animation: 'spin 0.8s linear infinite' }} aria-hidden="true" />
+        <p style={{ color: '#64748b', fontSize: '0.875rem' }}>Loading...</p>
       </div>
     );
   }
 
-  if (!isAuthenticated) {
-    return <Navigate to="/login" replace />;
-  }
+  if (!isAuthenticated) return <Navigate to="/login" replace />;
 
   return (
-    <div className="flex flex-col min-h-screen" style={{ background: '#020617' }}>
+    <div style={{ display: 'flex', flexDirection: 'column', minHeight: '100vh', background: '#020617' }}>
       <NavBar />
-      <main className="flex-1 overflow-y-auto">
+      {user?.role === 'viewer' && (
+        <div style={{ backgroundColor: '#1e293b', borderBottom: '1px solid #334155', padding: '0.4rem 1rem', textAlign: 'center', fontSize: '0.8125rem', color: '#94a3b8' }}>
+          Read Only Mode — You have view-only access
+        </div>
+      )}
+      <main style={{ flex: 1, overflowY: 'auto' }}>
         <Outlet />
       </main>
     </div>
@@ -85,192 +77,144 @@ const ProtectedRoute: React.FC = () => {
 
 // ── Navigation Bar ───────────────────────────────────────────────────────────
 
-const NAV_LINKS = [
+const BASE_NAV_LINKS = [
   { to: '/', label: 'Dashboard', end: true },
   { to: '/devices', label: 'Devices', end: false },
   { to: '/alerts', label: 'Alerts', end: false },
   { to: '/alert-rules', label: 'Alert Rules', end: false },
 ] as const;
 
-/** External link rendered as a plain anchor (opens in new tab). */
 const EXTERNAL_NAV_LINKS = [
   { href: '/grafana', label: 'Grafana' },
 ] as const;
 
-/**
- * Responsive navigation bar.
- * - Desktop (md+): horizontal nav links + user info inline
- * - Mobile (<md): hamburger button toggles a vertical dropdown menu
- */
 const NavBar: React.FC = () => {
   const { user, logout } = useAuth();
+  const { canManageUsers } = usePermissions();
   const navigate = useNavigate();
   const [menuOpen, setMenuOpen] = useState(false);
+  const [dropdownOpen, setDropdownOpen] = useState(false);
+  const dropdownRef = useRef<HTMLDivElement>(null);
+
+  const navLinks = canManageUsers
+    ? [...BASE_NAV_LINKS, { to: '/users', label: 'Users', end: false } as const]
+    : BASE_NAV_LINKS;
 
   const handleLogout = async () => {
+    setDropdownOpen(false);
     setMenuOpen(false);
     await logout();
     navigate('/login', { replace: true });
   };
 
-  const toggleMenu = () => setMenuOpen((prev) => !prev);
-  const closeMenu = () => setMenuOpen(false);
+  // Close dropdown on outside click
+  useEffect(() => {
+    const handler = (e: MouseEvent) => {
+      if (dropdownRef.current && !dropdownRef.current.contains(e.target as Node)) {
+        setDropdownOpen(false);
+      }
+    };
+    document.addEventListener('mousedown', handler);
+    return () => document.removeEventListener('mousedown', handler);
+  }, []);
+
+  const avatarLetter = user?.username?.[0]?.toUpperCase() ?? '?';
 
   return (
-    <nav
-      className="sticky top-0 z-50 flex-shrink-0"
-      style={{ background: '#0f172a', borderBottom: '1px solid #1e293b' }}
-      role="navigation"
-      aria-label="Main navigation"
-    >
-      {/* ── Top bar ── */}
-      <div className="flex items-center justify-between h-14 px-4 sm:px-6">
+    <nav style={{ background: '#0f172a', borderBottom: '1px solid #1e293b', position: 'sticky', top: 0, zIndex: 50 }} role="navigation" aria-label="Main navigation">
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', height: 56, padding: '0 1.5rem' }}>
         {/* Brand */}
-        <span className="text-white font-bold text-lg tracking-tight select-none">
-          InfraSense
-        </span>
+        <span style={{ color: '#f1f5f9', fontWeight: 700, fontSize: '1.125rem', letterSpacing: '-0.01em', userSelect: 'none' }}>InfraSense</span>
 
-        {/* Desktop nav links (hidden on mobile) */}
-        <ul className="hidden md:flex items-center gap-1 flex-1 ml-6" role="list">
-          {NAV_LINKS.map(({ to, label, end }) => (
+        {/* Desktop nav */}
+        <ul className="hidden md:flex" style={{ alignItems: 'center', gap: 4, flex: 1, marginLeft: '1.5rem', listStyle: 'none', padding: 0, margin: '0 0 0 1.5rem' }} role="list">
+          {navLinks.map(({ to, label, end }) => (
             <li key={to}>
-              <NavLink
-                to={to}
-                end={end}
-                className={({ isActive }) =>
-                  `px-3 py-1.5 rounded text-sm font-medium transition-colors duration-150 ${
-                    isActive
-                      ? 'bg-slate-700 text-white'
-                      : 'text-slate-400 hover:text-white hover:bg-slate-700'
-                  }`
-                }
-              >
+              <NavLink to={to} end={end} style={({ isActive }) => ({ padding: '0.375rem 0.75rem', borderRadius: 6, fontSize: '0.875rem', fontWeight: 500, textDecoration: 'none', color: isActive ? '#f1f5f9' : '#94a3b8', backgroundColor: isActive ? '#1e293b' : 'transparent', display: 'block' })}>
                 {label}
               </NavLink>
             </li>
           ))}
           {EXTERNAL_NAV_LINKS.map(({ href, label }) => (
             <li key={href}>
-              <a
-                href={href}
-                target="_blank"
-                rel="noopener noreferrer"
-                className="px-3 py-1.5 rounded text-sm font-medium transition-colors duration-150 text-slate-400 hover:text-white hover:bg-slate-700 inline-flex items-center gap-1"
-              >
+              <a href={href} target="_blank" rel="noopener noreferrer" style={{ padding: '0.375rem 0.75rem', borderRadius: 6, fontSize: '0.875rem', fontWeight: 500, textDecoration: 'none', color: '#94a3b8', display: 'inline-flex', alignItems: 'center', gap: 4 }}>
                 {label}
-                <svg className="w-3 h-3 opacity-60" fill="none" viewBox="0 0 24 24" stroke="currentColor" aria-hidden="true">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M10 6H6a2 2 0 00-2 2v10a2 2 0 002 2h10a2 2 0 002-2v-4M14 4h6m0 0v6m0-6L10 14" />
+                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                  <path d="M10 6H6a2 2 0 00-2 2v10a2 2 0 002 2h10a2 2 0 002-2v-4M14 4h6m0 0v6m0-6L10 14" />
                 </svg>
               </a>
             </li>
           ))}
         </ul>
 
-        {/* Desktop user info + logout (hidden on mobile) */}
+        {/* Desktop user avatar dropdown */}
         {user && (
-          <div className="hidden md:flex items-center gap-3 flex-shrink-0">
-            <div className="flex flex-col items-end gap-0.5">
-              <span className="text-white text-sm font-medium leading-none">
-                {user.username}
-              </span>
-              <span className="bg-slate-700 text-slate-400 text-xs font-semibold px-1.5 py-0.5 rounded-full capitalize">
-                {user.role}
-              </span>
-            </div>
+          <div ref={dropdownRef} className="hidden md:block" style={{ position: 'relative', flexShrink: 0 }}>
             <button
-              onClick={handleLogout}
-              className="border border-slate-500 text-slate-400 hover:text-white hover:border-slate-300 text-xs font-medium px-3 py-1.5 rounded transition-colors duration-150"
-              aria-label="Sign out"
+              onClick={() => setDropdownOpen((v) => !v)}
+              style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', background: 'none', border: 'none', cursor: 'pointer', padding: '0.25rem 0.5rem', borderRadius: 6 }}
+              aria-label="User menu"
+              aria-expanded={dropdownOpen}
             >
-              Sign Out
+              <div style={{ width: 32, height: 32, borderRadius: '50%', backgroundColor: '#2563eb', display: 'flex', alignItems: 'center', justifyContent: 'center', color: '#fff', fontWeight: 700, fontSize: '0.875rem', flexShrink: 0 }}>
+                {avatarLetter}
+              </div>
+              <span style={{ color: '#e2e8f0', fontSize: '0.875rem', fontWeight: 500 }}>{user.username}</span>
+              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="#64748b" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                <polyline points="6 9 12 15 18 9" />
+              </svg>
             </button>
+            {dropdownOpen && (
+              <div style={{ position: 'absolute', right: 0, top: '100%', marginTop: 4, backgroundColor: '#0f172a', border: '1px solid #1e293b', borderRadius: 8, boxShadow: '0 10px 30px rgba(0,0,0,0.4)', minWidth: 180, zIndex: 100 }}>
+                <Link to="/profile" onClick={() => setDropdownOpen(false)} style={{ display: 'block', padding: '0.625rem 1rem', fontSize: '0.875rem', color: '#e2e8f0', textDecoration: 'none' }}>My Profile</Link>
+                <div style={{ height: 1, backgroundColor: '#1e293b', margin: '0.25rem 0' }} />
+                <button onClick={handleLogout} style={{ display: 'block', width: '100%', textAlign: 'left', padding: '0.625rem 1rem', fontSize: '0.875rem', color: '#f87171', background: 'none', border: 'none', cursor: 'pointer' }}>
+                  Logout
+                </button>
+              </div>
+            )}
           </div>
         )}
 
-        {/* Hamburger button (visible on mobile only) */}
+        {/* Hamburger (mobile) */}
         <button
-          className="md:hidden flex flex-col justify-center items-center w-9 h-9 gap-1.5 rounded focus:outline-none focus:ring-2 focus:ring-slate-400"
-          onClick={toggleMenu}
+          className="md:hidden"
+          onClick={() => setMenuOpen((v) => !v)}
+          style={{ background: 'none', border: 'none', cursor: 'pointer', display: 'flex', flexDirection: 'column', gap: 5, padding: 4 }}
           aria-label={menuOpen ? 'Close menu' : 'Open menu'}
           aria-expanded={menuOpen}
-          aria-controls="mobile-menu"
         >
-          {/* Three bars — animate to X when open */}
-          <span
-            className={`block w-5 h-0.5 bg-slate-300 transition-transform duration-200 origin-center ${
-              menuOpen ? 'translate-y-2 rotate-45' : ''
-            }`}
-          />
-          <span
-            className={`block w-5 h-0.5 bg-slate-300 transition-opacity duration-200 ${
-              menuOpen ? 'opacity-0' : ''
-            }`}
-          />
-          <span
-            className={`block w-5 h-0.5 bg-slate-300 transition-transform duration-200 origin-center ${
-              menuOpen ? '-translate-y-2 -rotate-45' : ''
-            }`}
-          />
+          <span style={{ display: 'block', width: 20, height: 2, backgroundColor: '#94a3b8', transition: 'transform 0.2s', transform: menuOpen ? 'translateY(7px) rotate(45deg)' : 'none' }} />
+          <span style={{ display: 'block', width: 20, height: 2, backgroundColor: '#94a3b8', opacity: menuOpen ? 0 : 1, transition: 'opacity 0.2s' }} />
+          <span style={{ display: 'block', width: 20, height: 2, backgroundColor: '#94a3b8', transition: 'transform 0.2s', transform: menuOpen ? 'translateY(-7px) rotate(-45deg)' : 'none' }} />
         </button>
       </div>
 
-      {/* ── Mobile dropdown menu ── */}
+      {/* Mobile menu */}
       {menuOpen && (
-        <div
-          id="mobile-menu"
-          className="md:hidden bg-slate-800 border-t border-slate-700 px-4 pb-4"
-        >
-          <ul className="flex flex-col gap-1 mt-2" role="list">
-            {NAV_LINKS.map(({ to, label, end }) => (
+        <div style={{ backgroundColor: '#0f172a', borderTop: '1px solid #1e293b', padding: '0.75rem 1rem 1rem' }}>
+          <ul style={{ listStyle: 'none', padding: 0, margin: '0 0 0.75rem', display: 'flex', flexDirection: 'column', gap: 2 }}>
+            {navLinks.map(({ to, label, end }) => (
               <li key={to}>
-                <NavLink
-                  to={to}
-                  end={end}
-                  onClick={closeMenu}
-                  className={({ isActive }) =>
-                    `block px-3 py-2 rounded text-sm font-medium transition-colors duration-150 ${
-                      isActive
-                        ? 'bg-slate-700 text-white'
-                        : 'text-slate-400 hover:text-white hover:bg-slate-700'
-                    }`
-                  }
-                >
+                <NavLink to={to} end={end} onClick={() => setMenuOpen(false)} style={({ isActive }) => ({ display: 'block', padding: '0.5rem 0.75rem', borderRadius: 6, fontSize: '0.875rem', fontWeight: 500, textDecoration: 'none', color: isActive ? '#f1f5f9' : '#94a3b8', backgroundColor: isActive ? '#1e293b' : 'transparent' })}>
                   {label}
                 </NavLink>
               </li>
             ))}
-            {EXTERNAL_NAV_LINKS.map(({ href, label }) => (
-              <li key={href}>
-                <a
-                  href={href}
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  onClick={closeMenu}
-                  className="flex px-3 py-2 rounded text-sm font-medium transition-colors duration-150 text-slate-400 hover:text-white hover:bg-slate-700 items-center gap-1"
-                >
-                  {label}
-                  <svg className="w-3 h-3 opacity-60" fill="none" viewBox="0 0 24 24" stroke="currentColor" aria-hidden="true">
-                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M10 6H6a2 2 0 00-2 2v10a2 2 0 002 2h10a2 2 0 002-2v-4M14 4h6m0 0v6m0-6L10 14" />
-                  </svg>
-                </a>
-              </li>
-            ))}
           </ul>
-
-          {/* Mobile user info + logout */}
           {user && (
-            <div className="mt-3 pt-3 border-t border-slate-700 flex items-center justify-between">
-              <div className="flex flex-col gap-0.5">
-                <span className="text-white text-sm font-medium">{user.username}</span>
-                <span className="text-slate-400 text-xs capitalize">{user.role}</span>
+            <div style={{ borderTop: '1px solid #1e293b', paddingTop: '0.75rem', display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+                <div style={{ width: 28, height: 28, borderRadius: '50%', backgroundColor: '#2563eb', display: 'flex', alignItems: 'center', justifyContent: 'center', color: '#fff', fontWeight: 700, fontSize: '0.8rem' }}>{avatarLetter}</div>
+                <div>
+                  <div style={{ color: '#e2e8f0', fontSize: '0.875rem', fontWeight: 500 }}>{user.username}</div>
+                  <div style={{ color: '#64748b', fontSize: '0.75rem', textTransform: 'capitalize' }}>{user.role}</div>
+                </div>
               </div>
-              <button
-                onClick={handleLogout}
-                className="border border-slate-500 text-slate-400 hover:text-white hover:border-slate-300 text-xs font-medium px-3 py-1.5 rounded transition-colors duration-150"
-                aria-label="Sign out"
-              >
-                Sign Out
-              </button>
+              <div style={{ display: 'flex', gap: '0.5rem' }}>
+                <Link to="/profile" onClick={() => setMenuOpen(false)} style={{ fontSize: '0.8rem', color: '#94a3b8', textDecoration: 'none', padding: '0.375rem 0.625rem', border: '1px solid #334155', borderRadius: 4 }}>Profile</Link>
+                <button onClick={handleLogout} style={{ fontSize: '0.8rem', color: '#f87171', background: 'none', border: '1px solid #7f1d1d', borderRadius: 4, cursor: 'pointer', padding: '0.375rem 0.625rem' }}>Logout</button>
+              </div>
             </div>
           )}
         </div>
@@ -279,25 +223,26 @@ const NavBar: React.FC = () => {
   );
 };
 
-// ── Router ───────────────────────────────────────────────────────────────────
+// ── Routes ───────────────────────────────────────────────────────────────────
 
 const AppRoutes: React.FC = () => (
-  <Routes>
-    {/* Public route */}
-    <Route path="/login" element={<Login />} />
-
-    {/* Protected routes — wrapped in ProtectedRoute layout */}
-    <Route element={<ProtectedRoute />}>
-      <Route path="/" element={<Dashboard />} />
-      <Route path="/devices" element={<Devices />} />
-      <Route path="/devices/:id" element={<DeviceDetail />} />
-      <Route path="/alerts" element={<Alerts />} />
-      <Route path="/alert-rules" element={<AlertRules />} />
-    </Route>
-
-    {/* Catch-all: redirect unknown paths to dashboard */}
-    <Route path="*" element={<Navigate to="/" replace />} />
-  </Routes>
+  <ErrorBoundary>
+    <React.Suspense fallback={<div style={{ padding: 20, color: 'white' }}>Loading page...</div>}>
+      <Routes>
+        <Route path="/login" element={<Login />} />
+        <Route element={<ProtectedRoute />}>
+          <Route path="/" element={<Dashboard />} />
+          <Route path="/devices" element={<Devices />} />
+          <Route path="/devices/:id" element={<DeviceDetail />} />
+          <Route path="/alerts" element={<Alerts />} />
+          <Route path="/alert-rules" element={<AlertRules />} />
+          <Route path="/users" element={<UserManagement />} />
+          <Route path="/profile" element={<UserProfile />} />
+        </Route>
+        <Route path="*" element={<Navigate to="/" replace />} />
+      </Routes>
+    </React.Suspense>
+  </ErrorBoundary>
 );
 
 // ── Root App ─────────────────────────────────────────────────────────────────

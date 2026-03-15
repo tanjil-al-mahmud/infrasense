@@ -5,6 +5,8 @@ import (
 	"database/sql"
 	"fmt"
 	"log"
+	"net"
+	"strings"
 	"sync"
 	"time"
 
@@ -76,6 +78,13 @@ func (c *SNMPCollector) Start() error {
 	// Start polling goroutine
 	c.wg.Add(1)
 	go c.pollingLoop()
+
+	// Start SNMP trap listener on UDP port 162
+	go func() {
+		if err := c.startTrapListener(162); err != nil {
+			log.Printf("SNMP trap listener stopped: %v", err)
+		}
+	}()
 
 	return nil
 }
@@ -300,4 +309,59 @@ func (c *SNMPCollector) GetDeviceCount() int {
 	c.devicesMutex.RLock()
 	defer c.devicesMutex.RUnlock()
 	return len(c.devices)
+}
+
+// startTrapListener starts a UDP SNMP trap listener on the given port.
+// On receiving a trap it extracts the source IP, looks up the matching device,
+// and emits an infrasense_snmp_trap_received counter metric with trap_oid and device_id labels.
+func (c *SNMPCollector) startTrapListener(port int) error {
+	tl := gosnmp.NewTrapListener()
+	tl.Params = gosnmp.Default
+
+	tl.OnNewTrap = func(packet *gosnmp.SnmpPacket, addr *net.UDPAddr) {
+		timestamp := time.Now()
+
+		// Extract source IP (strip port if present)
+		srcIP := ""
+		if addr != nil {
+			srcIP = addr.IP.String()
+		}
+
+		// Look up device by IP address
+		c.devicesMutex.RLock()
+		var device *Device
+		for i := range c.devices {
+			if c.devices[i].IPAddress == srcIP {
+				device = &c.devices[i]
+				break
+			}
+		}
+		c.devicesMutex.RUnlock()
+
+		deviceID := "unknown"
+		if device != nil {
+			deviceID = fmt.Sprintf("%d", device.ID)
+		}
+
+		// Emit one counter metric per trap variable OID
+		for _, v := range packet.Variables {
+			trapOID := strings.TrimPrefix(v.Name, ".")
+			labels := map[string]string{
+				"trap_oid":  trapOID,
+				"device_id": deviceID,
+			}
+			if err := c.metricsWriter.WriteMetric("infrasense_snmp_trap_received", 1, labels, timestamp); err != nil {
+				log.Printf("Error writing trap metric for OID %s from %s: %v", trapOID, srcIP, err)
+			}
+		}
+
+		log.Printf("SNMP trap received from %s (device_id=%s): %d variables", srcIP, deviceID, len(packet.Variables))
+	}
+
+	addr := fmt.Sprintf("0.0.0.0:%d", port)
+	log.Printf("Starting SNMP trap listener on UDP %s", addr)
+	if err := tl.Listen(addr); err != nil {
+		return fmt.Errorf("SNMP trap listener on %s failed: %w", addr, err)
+	}
+	return nil
 }
